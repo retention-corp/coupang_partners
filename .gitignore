@@ -3,3 +3,5 @@ __pycache__/
 .env
 .env.*
 .omx/
+.data/
+*.sqlite3

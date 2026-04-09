@@ -17,6 +17,7 @@ class AnalyticsStore:
 
     def initialize(self) -> None:
         with sqlite3.connect(self.db_path) as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS queries (

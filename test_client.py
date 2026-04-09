@@ -94,7 +94,7 @@ class CoupangPartnersClientTests(unittest.TestCase):
         def opener(req, timeout):
             raise FakeHttpError()
 
-        with mock.patch("coupang_partners.client.error.HTTPError", FakeHttpError):
+        with mock.patch("client.error.HTTPError", FakeHttpError):
             with self.assertRaises(CoupangApiError) as ctx:
                 self.client.request(
                     "GET",

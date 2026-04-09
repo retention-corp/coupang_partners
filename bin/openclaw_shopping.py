@@ -34,7 +34,7 @@ def default_timeout_seconds(parser: argparse.ArgumentParser) -> int:
     return timeout
 
 
-def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Query the hosted OpenClaw shopping backend and print the JSON response.",
     )
@@ -134,7 +134,7 @@ def request_assist(base_url: str, payload: Dict[str, Any], timeout: int) -> Any:
         raise CliError(f"Backend returned invalid JSON: {raw}") from exc
 
 
-def main(argv: List[str] | None = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     try:
         args = parse_args(argv)
         payload = build_payload(args)
