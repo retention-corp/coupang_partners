@@ -85,6 +85,15 @@ The public skill package should contain:
 - user-visible prompts for query/budget/preferences
 - clear disclosure that recommendations come from a hosted operator backend
 
+## CLI bridge
+
+This repo also includes a thin CLI entrypoint at `bin/openclaw_shopping.py` for local smoke tests and scripted calls into the hosted backend.
+
+Recommended environment variables:
+
+- `OPENCLAW_SHOPPING_BASE_URL`
+- `OPENCLAW_SHOPPING_TIMEOUT_SECONDS`
+
 ## Operator checklist
 
 1. Configure backend-only Coupang credentials.

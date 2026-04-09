@@ -12,6 +12,7 @@ This repository currently ships a reusable Coupang Partners client and the docum
 - `POST /openapi/v2/products/reco`
 - Thin wrappers for documented `products/*` and `reports/*` endpoints
 - Documentation for the hosted backend, operator guardrails, and public OpenClaw skill handoff
+- A standard-library CLI bridge for calling the hosted shopping backend
 
 ## Coupang API environment variables
 
@@ -60,6 +61,23 @@ Recommended supporting documents in this repo:
 - `docs/openclaw-shopping-backend.md` — deployment model, data flow, guardrails, and manual smoke-test checklist
 - `openclaw_skill/README.md` — public skill packaging and installation notes
 - `openclaw_skill/SKILL.md` — operator-facing skill instructions for OpenClaw usage
+- `bin/openclaw_shopping.py` — a thin CLI bridge for local and hosted backend requests
+
+## OpenClaw CLI bridge
+
+Call the hosted backend directly from the command line:
+
+```bash
+export OPENCLAW_SHOPPING_BASE_URL="https://your-hosted-backend.example.com"
+python3 bin/openclaw_shopping.py \
+  "wireless noise cancelling headphones for flights" \
+  --budget 250000 \
+  --category headphones \
+  --must-have "noise cancelling" \
+  --must-have "bluetooth multipoint"
+```
+
+The CLI prints the backend JSON response to stdout and exits non-zero on transport or API errors.
 
 ## OpenClaw integration expectations
 
