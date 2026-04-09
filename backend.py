@@ -1,218 +1,154 @@
-import argparse
 import json
+import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
-from urllib import error, request
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-try:
-    from .analytics import AnalyticsStore
-    from .client import CoupangPartnersClient
-    from .recommendation import rank_products
-except ImportError:  # pragma: no cover - direct script fallback
-    from analytics import AnalyticsStore
-    from client import CoupangPartnersClient
-    from recommendation import rank_products
+from analytics import AnalyticsStore
+from recommendation import recommend_products
 
 
-def json_response(handler: BaseHTTPRequestHandler, status: int, payload: Dict[str, Any]) -> None:
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    handler.send_response(status)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.send_header("Content-Length", str(len(body)))
-    handler.end_headers()
-    handler.wfile.write(body)
+class BackendError(RuntimeError):
+    def __init__(self, status: int, message: str):
+        self.status = status
+        self.message = message
+        super().__init__(message)
 
 
-def read_json_body(handler: BaseHTTPRequestHandler) -> Dict[str, Any]:
-    length = int(handler.headers.get("Content-Length", "0"))
-    raw = handler.rfile.read(length) if length else b"{}"
-    return json.loads(raw.decode("utf-8") or "{}")
-
-
-def normalize_search_results(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    candidates = payload
-    if isinstance(payload, dict):
-        data = payload.get("data")
-        if isinstance(data, dict):
-            for key in ("productData", "products", "items"):
-                if isinstance(data.get(key), list):
-                    return list(data.get(key))
-        for key in ("products", "items", "data"):
-            if isinstance(payload.get(key), list):
-                return list(payload.get(key))
-    if isinstance(candidates, list):
-        return list(candidates)
-    return []
-
-
-def attach_deeplinks(adapter: Any, products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    urls = [product.get("productUrl") or product.get("url") for product in products]
-    urls = [url for url in urls if url]
-    if not urls or not hasattr(adapter, "deeplink"):
-        return products
-
-    try:
-        response = adapter.deeplink(urls)
-    except Exception:
-        return products
-
-    generated = {}
-    for item in response.get("data", []) if isinstance(response, dict) else []:
-        original = item.get("originalUrl") or item.get("coupangUrl")
-        deeplink = item.get("shortenUrl") or item.get("deeplink") or item.get("landingUrl")
-        if original and deeplink:
-            generated[original] = deeplink
-
-    enriched = []
-    for product in products:
-        original = product.get("productUrl") or product.get("url")
-        if original and generated.get(original):
-            product = {**product, "deeplink": generated[original]}
-        enriched.append(product)
-    return enriched
-
-
-class ShoppingBackendService:
-    def __init__(self, *, adapter: Any, analytics: AnalyticsStore) -> None:
+class ShoppingBackend:
+    def __init__(self, *, adapter: Any, analytics_store: AnalyticsStore) -> None:
         self.adapter = adapter
-        self.analytics = analytics
+        self.analytics_store = analytics_store
+
+    def health(self) -> Dict[str, Any]:
+        return {"ok": True, "service": "openclaw-shopping-backend"}
 
     def assist(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         query = (payload.get("query") or "").strip()
         if not query:
-            raise ValueError("query is required")
-
-        evidence_snippets = payload.get("evidence") or []
-        budget_max = payload.get("budget_max")
+            raise BackendError(HTTPStatus.BAD_REQUEST, "'query' is required")
+        budget = payload.get("budget")
         category = payload.get("category")
-        search_payload = self.adapter.search_products(keyword=query, limit=10)
-        products = attach_deeplinks(self.adapter, normalize_search_results(search_payload))
-        feedback = self.analytics.product_feedback()
-        recommendations = rank_products(
-            query,
-            products,
-            budget_max=float(budget_max) if budget_max is not None else None,
+        evidence_snippets = payload.get("evidence_snippets") or []
+        products = self._search_products(query=query, budget=budget, category=category)
+        recommendations = recommend_products(
+            query=query,
+            products=products,
+            budget=budget,
             evidence_snippets=evidence_snippets,
-            product_feedback=feedback,
         )
-        analytics_refs = self.analytics.log_assist(
+        query_id = self.analytics_store.record_assist(
             query_text=query,
-            budget_max=float(budget_max) if budget_max is not None else None,
+            budget=budget,
             category=category,
-            constraints={
-                "category": category,
-                "result_count": len(recommendations),
-            },
-            evidence_snippets=[
-                {
-                    "source": snippet.get("source", "user_supplied") if isinstance(snippet, dict) else "user_supplied",
-                    "snippet": snippet.get("snippet") if isinstance(snippet, dict) else str(snippet),
-                    "score": snippet.get("score", 0.0) if isinstance(snippet, dict) else 0.0,
-                    "risks": snippet.get("risks", []) if isinstance(snippet, dict) else [],
-                }
-                for snippet in evidence_snippets
-            ],
+            evidence_snippets=evidence_snippets,
             recommendations=recommendations,
         )
-        for recommendation, recommendation_id in zip(recommendations, analytics_refs["recommendation_ids"]):
-            recommendation["recommendation_id"] = recommendation_id
-
         return {
-            "ok": True,
-            "query": query,
-            "query_id": analytics_refs["query_id"],
+            "query_id": query_id,
             "recommendations": recommendations,
+            "risks": sorted({risk for item in recommendations for risk in item.get("risks", [])}),
             "summary": {
-                "returned": len(recommendations),
-                "candidate_count": len(products),
+                "candidate_count": len(recommendations),
+                "evidence_snippet_count": len(evidence_snippets),
             },
         }
 
     def record_event(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        event_type = payload.get("event_type")
+        event_type = (payload.get("event_type") or "").strip()
         if not event_type:
-            raise ValueError("event_type is required")
-        event_id = self.analytics.record_event(
-            event_type,
+            raise BackendError(HTTPStatus.BAD_REQUEST, "'event_type' is required")
+        event_id = self.analytics_store.record_event(
+            event_type=event_type,
             query_id=payload.get("query_id"),
             recommendation_id=payload.get("recommendation_id"),
-            session_id=payload.get("session_id"),
-            payload=payload.get("payload"),
+            metadata=payload.get("metadata") or {},
         )
         return {"ok": True, "event_id": event_id}
 
     def summary(self) -> Dict[str, Any]:
-        return {"ok": True, "summary": self.analytics.summary()}
+        return self.analytics_store.get_summary()
+
+    def _search_products(self, *, query: str, budget: Optional[int], category: Optional[str]) -> List[Dict[str, Any]]:
+        if hasattr(self.adapter, "search"):
+            return list(self.adapter.search(query=query, budget=budget, category=category))
+        if hasattr(self.adapter, "search_products"):
+            response = self.adapter.search_products(keyword=query, limit=10)
+            return _extract_products(response)
+        raise BackendError(HTTPStatus.INTERNAL_SERVER_ERROR, "Adapter must define search() or search_products().")
 
 
-def make_handler(service: ShoppingBackendService) -> type[BaseHTTPRequestHandler]:
-    class ShoppingHandler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802
+class _Handler(BaseHTTPRequestHandler):
+    backend: ShoppingBackend
+
+    def do_GET(self) -> None:  # noqa: N802
+        try:
             if self.path == "/healthz":
-                return json_response(self, HTTPStatus.OK, {"ok": True, "service": "openclaw-shopping-backend"})
+                self._send_json(HTTPStatus.OK, self.backend.health())
+                return
             if self.path == "/v1/admin/summary":
-                return json_response(self, HTTPStatus.OK, service.summary())
-            json_response(self, HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
+                self._send_json(HTTPStatus.OK, self.backend.summary())
+                return
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
+        except BackendError as exc:
+            self._send_json(exc.status, {"error": exc.message})
 
-        def do_POST(self) -> None:  # noqa: N802
-            try:
-                payload = read_json_body(self)
-                if self.path == "/v1/assist":
-                    return json_response(self, HTTPStatus.OK, service.assist(payload))
-                if self.path == "/v1/events":
-                    return json_response(self, HTTPStatus.OK, service.record_event(payload))
-                return json_response(self, HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
-            except ValueError as exc:
-                json_response(self, HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
-            except Exception as exc:  # pragma: no cover - defensive boundary
-                json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(exc)})
+    def do_POST(self) -> None:  # noqa: N802
+        try:
+            payload = self._read_json()
+            if self.path == "/v1/assist":
+                self._send_json(HTTPStatus.OK, self.backend.assist(payload))
+                return
+            if self.path == "/v1/events":
+                self._send_json(HTTPStatus.OK, self.backend.record_event(payload))
+                return
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
+        except BackendError as exc:
+            self._send_json(exc.status, {"error": exc.message})
+        except json.JSONDecodeError:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Invalid JSON body"})
 
-        def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
-            return None
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
+        return
 
-    return ShoppingHandler
+    def _read_json(self) -> Dict[str, Any]:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(content_length).decode("utf-8") if content_length else "{}"
+        return json.loads(raw)
 
-
-def create_server(
-    *,
-    adapter: Any,
-    db_path: str = "analytics.sqlite3",
-    host: str = "127.0.0.1",
-    port: int = 8000,
-) -> ThreadingHTTPServer:
-    service = ShoppingBackendService(
-        adapter=adapter,
-        analytics=AnalyticsStore(db_path),
-    )
-    return ThreadingHTTPServer((host, port), make_handler(service))
-
-
-def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the OpenClaw shopping backend.")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--db-path", default="analytics.sqlite3")
-    return parser.parse_args(argv)
+    def _send_json(self, status: int, payload: Dict[str, Any]) -> None:
+        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
 
 
-def main(argv: Optional[Iterable[str]] = None) -> int:
-    args = parse_args(argv)
-    server = create_server(
-        adapter=CoupangPartnersClient.from_env(),
-        db_path=args.db_path,
-        host=args.host,
-        port=args.port,
-    )
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:  # pragma: no cover - manual operation
-        pass
-    finally:
-        server.server_close()
-    return 0
+def _extract_products(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not payload:
+        return []
+    if isinstance(payload, list):
+        return payload
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if isinstance(data, dict):
+        for key in ("products", "productData", "items"):
+            if isinstance(data.get(key), list):
+                return data[key]
+    for key in ("products", "productData", "items"):
+        if isinstance(payload.get(key), list):
+            return payload[key]
+    return []
 
 
-if __name__ == "__main__":  # pragma: no cover - CLI entry
-    raise SystemExit(main())
+def build_server(*, host: str, port: int, adapter: Any, db_path: str) -> ThreadingHTTPServer:
+    analytics_store = AnalyticsStore(db_path)
+    backend = ShoppingBackend(adapter=adapter, analytics_store=analytics_store)
+    handler = type("OpenClawRequestHandler", (_Handler,), {"backend": backend})
+    return ThreadingHTTPServer((host, port), handler)
+
+
+def serve_in_thread(server: ThreadingHTTPServer) -> threading.Thread:
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return thread

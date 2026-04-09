@@ -1,76 +1,16 @@
----
-name: openclaw-shopping
-summary: Thin public skill for querying a hosted Coupang-backed shopping assistant without exposing affiliate secrets.
----
-
 # OpenClaw Shopping Skill
 
-Use this skill when a user wants a product recommendation from the operator-hosted shopping backend.
+Use the hosted shopping backend to request evidence-backed Coupang product recommendations without exposing affiliate secrets in the public skill package.
 
-## Goals
+## Required setup
 
-1. Capture the user's shopping intent clearly.
-2. Send only request data that the hosted backend needs.
-3. Return grounded recommendations with rationale and caveats.
-4. Preserve the backend moat by never exposing operator secrets.
+- Set `OPENCLAW_SHOPPING_BACKEND_URL` to the deployed backend base URL.
+- Do not add Coupang affiliate keys to this skill package.
+- When publishing affiliate links, include the required disclosure for your channel.
 
-## Inputs to gather
+## Example flow
 
-- shopping query in natural language
-- optional budget or price ceiling
-- category or brand preferences
-- hard exclusions
-- optional evidence snippets the user explicitly wants considered
-
-## Behavioral rules
-
-- Never request `COUPANG_ACCESS_KEY` or `COUPANG_SECRET_KEY` from the user.
-- Prefer explicit constraints over inferred assumptions.
-- Present uncertainty honestly when evidence is weak.
-- Include caveats alongside recommendations.
-- Remind the operator to provide affiliate disclosure in user-facing surfaces that publish links.
-
-## Hosted-backend expectation
-
-The backend should expose:
-
-- `GET /healthz`
-- `POST /v1/assist`
-- `POST /v1/events`
-
-Recommended configuration:
-
-```bash
-export OPENCLAW_SHOPPING_BASE_URL="https://your-hosted-backend.example.com"
-export OPENCLAW_SHOPPING_TIMEOUT_SECONDS="30"
-```
-
-## Suggested request shape
-
-```json
-{
-  "query": "wireless noise cancelling headphones for flights",
-  "budget": 250000,
-  "constraints": {
-    "category": "headphones",
-    "must_have": ["noise cancelling", "bluetooth multipoint"],
-    "avoid": ["on-ear"]
-  },
-  "evidence_snippets": [
-    "User prefers long battery life and USB-C charging."
-  ]
-}
-```
-
-## Expected response shape
-
-Return a concise shortlist with:
-
-- item name
-- why it was recommended
-- notable risks or tradeoffs
-- deeplink URL
-
-## Operator note
-
-If the CLI entrypoint or environment-variable names change during implementation, update this skill file and `openclaw_skill/README.md` in the same change.
+1. Accept the user's product request and optional budget/category hints.
+2. Optionally gather user-visible evidence snippets (copied text or explicit browser snapshots).
+3. Send the query to `POST /v1/assist` on the hosted backend.
+4. Present the ranked shortlist, rationale, risks, and deeplinks.

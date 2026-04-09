@@ -1,139 +1,88 @@
 from typing import Any, Dict, Iterable, List, Optional
 
-try:
-    from .evidence import extract_evidence, safe_float
-except ImportError:  # pragma: no cover - direct script fallback
-    from evidence import extract_evidence, safe_float
+from evidence import build_evidence
 
 
-def normalize_product(product: Dict[str, Any]) -> Dict[str, Any]:
-    product_id = str(
-        product.get("productId")
-        or product.get("itemId")
-        or product.get("id")
-        or product.get("productUrl")
-        or product.get("url")
-        or ""
-    )
+def _coerce_int(value: Any) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_product(raw_product: Dict[str, Any]) -> Dict[str, Any]:
+    title = raw_product.get("title") or raw_product.get("productName") or "Untitled product"
+    price = _coerce_int(raw_product.get("price") or raw_product.get("salePrice") or raw_product.get("productPrice"))
+    deeplink = raw_product.get("deeplink") or raw_product.get("productUrl") or raw_product.get("url")
     return {
-        **product,
-        "product_id": product_id,
-        "product_name": product.get("productName") or product.get("name") or "Unknown product",
-        "price": safe_float(product.get("productPrice") or product.get("price")),
-        "currency": product.get("currency") or "KRW",
-        "rating": safe_float(product.get("rating") or product.get("productRating")),
-        "review_count": int(safe_float(product.get("reviewCount") or product.get("ratingCount")) or 0),
-        "product_url": product.get("productUrl") or product.get("url"),
-        "deeplink": product.get("deeplink"),
-        "vendor": product.get("vendor") or product.get("brand"),
+        "product_id": str(raw_product.get("product_id") or raw_product.get("productId") or raw_product.get("id") or title),
+        "title": title,
+        "price": price,
+        "currency": raw_product.get("currency", "KRW"),
+        "vendor": raw_product.get("vendor") or raw_product.get("brand"),
+        "rating": raw_product.get("rating") or raw_product.get("ratingAverage") or 0,
+        "review_count": raw_product.get("review_count") or raw_product.get("reviewCount") or 0,
+        "deeplink": deeplink,
+        "metadata": raw_product,
     }
 
 
-def compose_rationale(
-    query: str,
-    candidate: Dict[str, Any],
-    evidence: Dict[str, Any],
+def _budget_delta_score(price: Optional[int], budget: Optional[int]) -> float:
+    if budget is None or price is None:
+        return 0.0
+    if price > budget:
+        return -8.0 - ((price - budget) / max(budget, 1))
+    return max(0.0, 6.0 - abs(budget - price) / max(budget, 1) * 6.0)
+
+
+def _compose_rationale(product: Dict[str, Any], evidence: Dict[str, Any], budget: Optional[int]) -> str:
+    fragments: List[str] = []
+    if evidence["matched_terms"]:
+        fragments.append(f"It directly matches {', '.join(evidence['matched_terms'])} from the shopping request")
+    if product.get("price") is not None and budget is not None and product["price"] <= budget:
+        fragments.append(f"it stays within the ₩{budget:,} budget")
+    if product.get("rating"):
+        fragments.append(f"its rating is {float(product['rating']):.1f}")
+    if product.get("review_count"):
+        fragments.append(f"it has {int(product['review_count'])} reviews")
+    if evidence["snippets"]:
+        fragments.append("the supplied evidence snippets reinforce the fit")
+    if not fragments:
+        fragments.append("it is the strongest available match from the current metadata")
+    sentence = "; ".join(fragments)
+    return sentence[0].upper() + sentence[1:] + "."
+
+
+def recommend_products(
     *,
-    budget_max: Optional[float] = None,
-    feedback: Optional[Dict[str, int]] = None,
-) -> str:
-    reasons: List[str] = []
-    matched = evidence.get("matched_terms", [])
-    if matched:
-        reasons.append(f"matches query terms: {', '.join(matched[:4])}")
-
-    rating = candidate.get("rating")
-    review_count = candidate.get("review_count", 0)
-    if rating:
-        reasons.append(f"rating signal {rating:.1f}/5 from {review_count} reviews")
-
-    price = candidate.get("price")
-    if budget_max is not None and price is not None:
-        if price <= budget_max:
-            reasons.append(f"fits the stated budget at ₩{int(price):,}")
-        else:
-            reasons.append(f"exceeds the stated budget at ₩{int(price):,}")
-    elif price is not None:
-        reasons.append(f"current listed price is ₩{int(price):,}")
-
-    if feedback:
-        clicks = feedback.get("clicks", 0)
-        purchases = feedback.get("purchases", 0)
-        if purchases:
-            reasons.append(f"has {purchases} recorded downstream purchase signals")
-        elif clicks:
-            reasons.append(f"has {clicks} prior deeplink click signals")
-
-    if not reasons:
-        reasons.append(f"retained as a fallback candidate for {query}")
-
-    rationale = "; ".join(reasons)
-    if evidence.get("risks"):
-        rationale += f". Risks: {', '.join(evidence['risks'])}."
-    else:
-        rationale += "."
-    return rationale
-
-
-def rank_products(
     query: str,
     products: Iterable[Dict[str, Any]],
-    *,
-    budget_max: Optional[float] = None,
-    evidence_snippets: Optional[Iterable[Any]] = None,
-    product_feedback: Optional[Dict[str, Dict[str, int]]] = None,
-    top_n: int = 5,
+    budget: Optional[int] = None,
+    evidence_snippets: Iterable[Dict[str, Any]] | None = None,
+    top_n: int = 3,
 ) -> List[Dict[str, Any]]:
-    ranked: List[Dict[str, Any]] = []
-    feedback_lookup = product_feedback or {}
-
+    recommendations: List[Dict[str, Any]] = []
     for raw_product in products:
-        candidate = normalize_product(raw_product)
-        price = candidate.get("price")
-        if budget_max is not None and price is not None and price > budget_max:
+        product = normalize_product(raw_product)
+        if budget is not None and product["price"] is not None and product["price"] > budget * 1.25:
             continue
-
-        evidence = extract_evidence(query, candidate, evidence_snippets)
-        feedback = feedback_lookup.get(candidate["product_id"], {})
-        engagement_bonus = min(
-            feedback.get("clicks", 0) * 0.15 + feedback.get("purchases", 0) * 0.4,
-            1.5,
-        )
-        budget_bonus = 0.0
-        if budget_max is not None and price is not None:
-            budget_bonus = max(0.0, 1.0 - (price / budget_max))
-
-        score = round(evidence["score"] + engagement_bonus + budget_bonus, 4)
-        ranked.append(
+        evidence = build_evidence(product, query, evidence_snippets)
+        score = round(evidence["score"] + _budget_delta_score(product["price"], budget), 2)
+        recommendations.append(
             {
-                "product_id": candidate["product_id"],
-                "product_name": candidate["product_name"],
-                "vendor": candidate.get("vendor"),
-                "price": candidate.get("price"),
-                "currency": candidate.get("currency"),
-                "rating": candidate.get("rating"),
-                "review_count": candidate.get("review_count"),
-                "product_url": candidate.get("product_url"),
-                "deeplink": candidate.get("deeplink") or candidate.get("product_url"),
+                **product,
                 "score": score,
-                "evidence": evidence,
-                "risks": evidence.get("risks", []),
-                "rationale": compose_rationale(
-                    query,
-                    candidate,
-                    evidence,
-                    budget_max=budget_max,
-                    feedback=feedback,
-                ),
+                "rationale": _compose_rationale(product, evidence, budget),
+                "risks": evidence["risks"],
+                "evidence": {
+                    "facts": evidence["facts"],
+                    "matched_terms": evidence["matched_terms"],
+                    "snippet_count": len(evidence["snippets"]),
+                },
             }
         )
 
-    ranked.sort(
-        key=lambda item: (
-            item["score"],
-            item.get("rating") or 0.0,
-            -(item.get("price") or 0.0) if budget_max else item.get("review_count") or 0,
-        ),
-        reverse=True,
-    )
-    return ranked[:top_n]
+    recommendations.sort(key=lambda item: (item["score"], item.get("review_count", 0), -(item.get("price") or 0)), reverse=True)
+    return recommendations[:top_n]
