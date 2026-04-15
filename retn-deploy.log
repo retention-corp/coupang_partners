@@ -1,0 +1,46 @@
+ERROR: (gcloud.run.deploy) argument --set-env-vars: Bad syntax for dict arg: [OPENCL]. Please see `gcloud topic flags-file` or `gcloud topic escaping` for information on providing list or dictionary flag values with special characters.
+Usage: gcloud run deploy [[SERVICE] --namespace=NAMESPACE] [optional flags]
+  optional flags may be  --add-cloudsql-instances | --add-custom-audiences |
+                         --add-volume | --add-volume-mount |
+                         --allow-unauthenticated | --args | --async |
+                         --automatic-updates | --base-image |
+                         --binary-authorization | --breakglass |
+                         --build-env-vars-file | --build-service-account |
+                         --build-worker-pool | --clear-base-image |
+                         --clear-binary-authorization | --clear-build-env-vars |
+                         --clear-build-service-account |
+                         --clear-build-worker-pool |
+                         --clear-cloudsql-instances | --clear-custom-audiences |
+                         --clear-encryption-key-shutdown-hours |
+                         --clear-env-vars | --clear-key | --clear-labels |
+                         --clear-network | --clear-network-tags |
+                         --clear-post-key-revocation-action-type |
+                         --clear-secrets | --clear-volume-mounts |
+                         --clear-volumes | --clear-vpc-connector | --command |
+                         --concurrency | --container | --cpu | --cpu-boost |
+                         --cpu-throttling | --default-url | --depends-on |
+                         --deploy-health-check | --description |
+                         --encryption-key-shutdown-hours | --env-vars-file |
+                         --execution-environment | --function | --gpu |
+                         --gpu-type | --gpu-zonal-redundancy | --help | --iap |
+                         --image | --ingress | --invoker-iam-check | --key |
+                         --labels | --liveness-probe | --max | --max-instances |
+                         --memory | --min | --min-instances | --namespace |
+                         --network | --network-tags | --port |
+                         --post-key-revocation-action-type | --region |
+                         --regions | --remove-build-env-vars |
+                         --remove-cloudsql-instances | --remove-containers |
+                         --remove-custom-audiences | --remove-env-vars |
+                         --remove-labels | --remove-secrets | --remove-volume |
+                         --remove-volume-mount | --revision-suffix | --scaling |
+                         --service-account | --session-affinity |
+                         --set-build-env-vars | --set-cloudsql-instances |
+                         --set-custom-audiences | --set-env-vars |
+                         --set-secrets | --source | --startup-probe | --subnet |
+                         --tag | --timeout | --no-traffic |
+                         --update-build-env-vars | --update-env-vars |
+                         --update-labels | --update-secrets | --use-http2 |
+                         --vpc-connector | --vpc-egress
+
+For detailed information on this command and its flags, run:
+  gcloud run deploy --help

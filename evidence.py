@@ -44,10 +44,20 @@ def build_evidence(product: Dict[str, Any], query: str, snippets: Optional[Itera
     review_score = min(review_count / 25.0, 8.0)
     rating_score = rating * 2.0
     evidence_score = round(keyword_score + listing_signal_score + review_score + rating_score + snippet_bonus, 2)
+    confidence = _classify_confidence(
+        matched_term_count=len(matched_terms),
+        has_snippets=bool(normalized_snippets),
+        review_count=review_count,
+        listing_signal_count=len(listing_signals),
+    )
 
     risks: List[str] = []
     if not normalized_snippets:
         risks.append("No external evidence snippet supplied; rationale relies on product metadata.")
+    if confidence == "low":
+        risks.append("Metadata-only evidence makes product fit uncertain.")
+    elif confidence == "medium":
+        risks.append("Evidence is partial, so final fit should be validated before publishing.")
     if review_count < 20:
         risks.append("Limited review history reduces confidence.")
     if rating and rating < 4.0:
@@ -70,8 +80,25 @@ def build_evidence(product: Dict[str, Any], query: str, snippets: Optional[Itera
     return {
         "matched_terms": matched_terms,
         "listing_signals": listing_signals,
+        "confidence": confidence,
         "score": evidence_score,
         "risks": risks,
         "facts": facts,
         "snippets": normalized_snippets,
     }
+
+
+def _classify_confidence(
+    *,
+    matched_term_count: int,
+    has_snippets: bool,
+    review_count: int,
+    listing_signal_count: int,
+) -> str:
+    if has_snippets and (matched_term_count >= 2 or listing_signal_count >= 1):
+        return "high"
+    if matched_term_count >= 2 and review_count >= 20:
+        return "medium"
+    if matched_term_count >= 1 and (review_count >= 20 or listing_signal_count >= 1):
+        return "medium"
+    return "low"

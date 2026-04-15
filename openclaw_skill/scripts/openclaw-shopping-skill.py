@@ -3,15 +3,71 @@ import argparse
 import json
 import os
 import sys
-from urllib import request
+from urllib import parse, request
 from urllib.error import HTTPError, URLError
+
+DEFAULT_HOSTED_BACKEND = "https://a.retn.kr"
+
+
+def _backend_base_url():
+    return (
+        os.getenv("OPENCLAW_SHOPPING_BASE_URL")
+        or os.getenv("OPENCLAW_SHOPPING_BACKEND_URL")
+        or os.getenv("SHOPPING_COPILOT_BASE_URL")
+        or DEFAULT_HOSTED_BACKEND
+    )
+
+
+def _auth_token():
+    singular = (os.getenv("OPENCLAW_SHOPPING_API_TOKEN") or "").strip()
+    if singular:
+        return singular
+    plural = (os.getenv("OPENCLAW_SHOPPING_API_TOKENS") or "").strip()
+    if not plural:
+        return ""
+    return next((token.strip() for token in plural.split(",") if token.strip()), "")
+
+
+def _allowed_backend_hosts():
+    env_hosts = (os.getenv("OPENCLAW_SHOPPING_ALLOWED_BACKEND_HOSTS") or "").strip()
+    hosts = [host.strip().lower() for host in env_hosts.split(",") if host.strip()]
+    hosts.extend(["a.retn.kr", "127.0.0.1", "localhost"])
+    return tuple(dict.fromkeys(hosts))
+
+
+def _validate_backend_url(url: str) -> None:
+    try:
+        parsed = parse.urlparse(url)
+    except ValueError as exc:
+        raise RuntimeError(f"backend URL is invalid: {url}") from exc
+
+    host = (parsed.hostname or "").lower()
+    scheme = (parsed.scheme or "").lower()
+    if not host or scheme not in {"http", "https"}:
+        raise RuntimeError(f"backend URL must be http or https: {url}")
+
+    if host in {"127.0.0.1", "localhost"}:
+        return
+    if scheme != "https":
+        raise RuntimeError(f"backend URL must use https outside localhost: {url}")
+
+    allowed_hosts = _allowed_backend_hosts()
+    if not any(host == allowed or host.endswith(f".{allowed}") for allowed in allowed_hosts):
+        raise RuntimeError(f"backend host is not approved: {host}")
 
 
 def _post_json(url: str, payload):
+    _validate_backend_url(url)
+    headers = {"Content-Type": "application/json"}
+    auth_token = _auth_token()
+    client_id = os.getenv("OPENCLAW_SHOPPING_CLIENT_ID", "openclaw-skill")
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    headers["X-OpenClaw-Client-Id"] = client_id
     req = request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:
@@ -29,7 +85,7 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     recommend = subparsers.add_parser("recommend")
-    recommend.add_argument("--backend", default=os.getenv("OPENCLAW_SHOPPING_BASE_URL"))
+    recommend.add_argument("--backend", default=_backend_base_url())
     recommend.add_argument("--query", required=True)
     recommend.add_argument("--price-max", type=int, default=None)
     recommend.add_argument("--limit", type=int, default=5)
@@ -37,7 +93,7 @@ def main() -> int:
     recommend.add_argument("--exclude-term", action="append", default=[])
 
     deeplinks = subparsers.add_parser("deeplinks")
-    deeplinks.add_argument("--backend", default=os.getenv("OPENCLAW_SHOPPING_BASE_URL"))
+    deeplinks.add_argument("--backend", default=_backend_base_url())
     deeplinks.add_argument("--url", action="append", required=True)
 
     args = parser.parse_args()

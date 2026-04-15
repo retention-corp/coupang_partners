@@ -4,6 +4,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
+
+import bin.openclaw_shopping as openclaw_cli
 
 from backend import build_server, serve_in_thread
 
@@ -17,7 +20,7 @@ class FakeAdapter:
                         "productId": 11,
                         "productName": "저소음 초경량 무선청소기",
                         "productPrice": 129000,
-                        "productUrl": "https://example.com/11",
+                        "productUrl": "https://www.coupang.com/vp/products/11",
                         "reviewCount": 87,
                         "ratingAverage": 4.5,
                         "isRocket": True,
@@ -32,6 +35,10 @@ class FakeAdapter:
 
 
 class CliTests(unittest.TestCase):
+    def test_cli_defaults_to_hosted_backend(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(openclaw_cli._base_url_from_env(), "https://a.retn.kr")
+
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.server = build_server(

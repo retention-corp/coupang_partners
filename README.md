@@ -58,26 +58,94 @@ reco_response = client.get_reco_v2(reco_payload)
 The backend keeps economic capture in a hosted service instead of embedding
 Coupang credentials in a public skill package.
 
+Hosted-first recommendation:
+
+- Public skills and thin clients should default to `https://a.retn.kr`
+- Local backend execution is for operator development only
+- Affiliate deeplink creation should stay server-side so published links keep the operator's attribution
+
 Run it with:
 
 ```bash
 export COUPANG_ACCESS_KEY="your-access-key"
 export COUPANG_SECRET_KEY="your-secret-key"
+export OPENCLAW_SHOPPING_API_TOKENS="replace-with-random-long-token"
 export OPENCLAW_SHOPPING_DB_PATH=".data/openclaw-shopping.sqlite3"
 python3 backend.py
 ```
 
 Public endpoints:
 
-- `GET /healthz`
+- `GET /health`
 - `POST /v1/assist`
 - `POST /v1/events`
+
+Protected endpoints require:
+
+- `Authorization: Bearer <token>` when `OPENCLAW_SHOPPING_API_TOKENS` is configured
+- optional `X-OpenClaw-Client-Id` for caller identification
 - `GET /v1/admin/summary`
+
+Optional hardening env vars:
+
+- `OPENCLAW_SHOPPING_CLIENT_ALLOWLIST_ENABLED=true` to enforce caller allowlisting
+- `OPENCLAW_SHOPPING_CLIENT_ALLOWLIST=shopping-copilot,discord-bot` for approved client IDs
+- `OPENCLAW_SHOPPING_RATE_LIMIT_REQUESTS_PUBLIC` / `OPENCLAW_SHOPPING_RATE_LIMIT_WINDOW_SECONDS_PUBLIC`
+- `OPENCLAW_SHOPPING_RATE_LIMIT_REQUESTS_AUTH` / `OPENCLAW_SHOPPING_RATE_LIMIT_WINDOW_SECONDS_AUTH`
+- `OPENCLAW_SHOPPING_RATE_LIMIT_REQUESTS_ADMIN` / `OPENCLAW_SHOPPING_RATE_LIMIT_WINDOW_SECONDS_ADMIN`
+
+Client compatibility notes:
+
+- Thin clients accept both `OPENCLAW_SHOPPING_API_TOKEN` and `OPENCLAW_SHOPPING_API_TOKENS`
+- Thin clients accept `OPENCLAW_SHOPPING_BASE_URL`, `OPENCLAW_SHOPPING_BACKEND_URL`, or `SHOPPING_COPILOT_BASE_URL`
+
+Default protection:
+
+- request payload limits on `query` and `evidence_snippets`
+- in-process rate limiting
+- optional per-client allowlist enforcement
+- optional separate public/auth/admin rate-limit buckets
+- deeplink host allowlist (`coupang.com`, `link.coupang.com`, `www.coupang.com`)
+
+Built-in short-link provider for local development:
+
+```bash
+export OPENCLAW_SHOPPING_SHORTENER="builtin"
+export OPENCLAW_SHOPPING_PUBLIC_BASE_URL="https://go.example.com"
+```
+
+If `OPENCLAW_SHOPPING_PUBLIC_BASE_URL` points at a non-local host, also set
+`OPENCLAW_SHOPPING_API_TOKEN` or `OPENCLAW_SHOPPING_API_TOKENS`, because the
+backend treats that as a protected deployment shape.
+
+Local development is intentionally a separate override path. Public docs and install defaults should keep pointing at `https://a.retn.kr`.
+
+When enabled, recommendation responses include `short_deeplink`, and `/v1/deeplinks` includes `shortenedShareUrl`.
+The backend also exposes `GET /s/<slug>` and redirects to the original affiliate URL.
+
+Shared Firestore short-link provider for Cloud Run:
+
+```bash
+export OPENCLAW_SHOPPING_SHORTENER="firestore"
+export OPENCLAW_SHOPPING_ANALYTICS_PROVIDER="firestore"
+export GOOGLE_CLOUD_PROJECT="retn-kr-website"
+export OPENCLAW_SHOPPING_PUBLIC_BASE_URL="https://a.retn.kr"
+export OPENCLAW_SHORT_LINKS_COLLECTION="short_links"
+export OPENCLAW_ANALYTICS_COLLECTION_PREFIX="shopping"
+```
+
+Notes:
+
+- Firestore mode keeps short-link slugs durable across Cloud Run instance replacement.
+- Firestore analytics mode keeps query/recommendation/event summaries shared across instances.
+- If `FIRESTORE_EMULATOR_HOST` is set, the backend talks to the emulator without OAuth.
+- If Firestore short-link generation fails, the backend now falls back to the original affiliate URL instead of dropping the request.
 
 Sample request:
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8765/v1/assist \
+curl -sS -X POST https://a.retn.kr/v1/assist \
+  -H 'Authorization: Bearer replace-with-random-long-token' \
   -H 'Content-Type: application/json' \
   -d '{
     "query": "30만원 이하 무선청소기, 원룸용",
@@ -95,7 +163,8 @@ curl -sS -X POST http://127.0.0.1:8765/v1/assist \
 CLI bridge example:
 
 ```bash
-export OPENCLAW_SHOPPING_BASE_URL="http://127.0.0.1:8765"
+export OPENCLAW_SHOPPING_BASE_URL="https://a.retn.kr"
+export OPENCLAW_SHOPPING_API_TOKEN="replace-with-random-long-token"
 
 python3 bin/openclaw_shopping.py \
   "30만원 이하 무선청소기, 원룸용" \
@@ -125,6 +194,8 @@ See `openclaw_skill/README.md` for the public contract.
 - Affiliate disclosure is still required anywhere generated links are published.
 - Evidence ingestion should stay explicit, auditable, and degrade gracefully when page evidence is weak.
 - The backend should not claim review/detail analysis when only metadata-level evidence is available.
+- Low-confidence recommendation summaries should remain conservative and explicitly say when fit is metadata-only.
+- Never commit real Coupang keys or bearer tokens to this repository. Use runtime env vars or Secret Manager only.
 
 ## Tests
 

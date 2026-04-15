@@ -19,10 +19,12 @@ Expected input:
 - natural-language shopping query
 - optional budget/category constraints
 - optional evidence snippets, HTML snapshots, or operator-supplied notes
+- direct shopping search intents such as "제일 긴", "최저가", "평점 높은", and "리뷰 많은"
 
 Expected output:
 
 - ranked recommendations
+- comparison-aware ranking when the query asks for the longest, cheapest, highest-rated, or most-reviewed item
 - grounded rationale for each recommendation
 - explicit risks/caveats
 - deeplinks suitable for affiliate attribution
@@ -47,7 +49,9 @@ Operators should be able to inspect:
 
 ## Data model guidance
 
-The approved MVP uses sqlite for a reversible standard-library implementation.
+The approved MVP keeps sqlite support for local reversibility, but production
+can now use Firestore for both analytics and short-link state when the backend
+runs on Cloud Run.
 
 Suggested tables from the PRD:
 
@@ -55,6 +59,7 @@ Suggested tables from the PRD:
 - `recommendations`
 - `events`
 - `evidence_snippets`
+- `short_links` only for the local builtin shortener
 
 Store enough context to improve later ranking without storing unnecessary secrets or opaque blobs by default.
 
@@ -100,14 +105,16 @@ Recommended environment variables:
 2. Publish the backend at a stable base URL.
 3. Expose only the documented public endpoints.
 4. Add affiliate disclosure anywhere recommendations are published to end users.
-5. Review evidence ingestion and logging retention before broad rollout.
+5. Set `OPENCLAW_SHOPPING_SHORTENER=firestore` for production so short links survive instance replacement.
+6. Set `OPENCLAW_SHOPPING_ANALYTICS_PROVIDER=firestore` for production so admin summaries survive instance replacement.
+7. Review evidence ingestion and logging retention before broad rollout.
 
 ## Manual smoke test checklist
 
 1. Start the backend locally or in a staging environment.
-2. Call `GET /healthz` and confirm machine-readable JSON.
+2. Call `GET /health` and confirm machine-readable JSON.
 3. Submit a sample `POST /v1/assist` request with a realistic shopping query.
 4. Confirm the response includes recommendations, rationale, risks, and deeplinks.
 5. Emit a sample `POST /v1/events` payload.
-6. Inspect sqlite-backed admin summary output.
+6. Inspect admin summary output and confirm `total_short_links` is populated by the active shortener provider.
 7. Verify the public skill docs do not reveal secrets.

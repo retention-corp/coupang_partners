@@ -5,9 +5,34 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
 
-from analytics import AnalyticsStore
+from analytics import AnalyticsStore, build_analytics_store_from_env
 from client import CoupangPartnersClient
-from recommendation import build_assist_response, build_search_queries, normalize_request, recommend_products
+from economics import build_economics_summary
+from recommendation import (
+    build_assist_response,
+    build_search_queries,
+    infer_exclusion_terms,
+    normalize_request,
+    recommend_products,
+)
+from security import (
+    build_rate_limiter_for_mode,
+    build_rate_limiter_from_env,
+    generate_request_id,
+    is_client_allowlisted,
+    log_event,
+    normalize_client_ip,
+    parse_bearer_token,
+    rate_limit_key,
+    shopping_auth_required_from_env,
+    shopping_api_tokens_from_env,
+    shopping_client_allowlist_enabled_from_env,
+    shopping_client_allowlist_from_env,
+    summarize_client,
+    validate_deeplink_url,
+    validate_payload_limits,
+)
+from url_shortener import BuiltinShortener, FirestoreShortener, UrlShortener
 
 
 class BackendError(RuntimeError):
@@ -18,9 +43,21 @@ class BackendError(RuntimeError):
 
 
 class ShoppingBackend:
-    def __init__(self, *, adapter: Any, analytics_store: AnalyticsStore) -> None:
+    def __init__(
+        self,
+        *,
+        adapter: Any,
+        analytics_store: AnalyticsStore,
+        shortener: Optional[UrlShortener] = None,
+        allowed_deeplink_hosts: Optional[List[str]] = None,
+    ) -> None:
         self.adapter = adapter
         self.analytics_store = analytics_store
+        self.shortener = shortener
+        self.allowed_deeplink_hosts = allowed_deeplink_hosts or [
+            "coupang.com",
+            "link.coupang.com",
+        ]
 
     def health(self) -> Dict[str, Any]:
         return {
@@ -30,6 +67,9 @@ class ShoppingBackend:
         }
 
     def assist(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        payload_error = validate_payload_limits(payload)
+        if payload_error:
+            raise BackendError(HTTPStatus.BAD_REQUEST, payload_error)
         normalized = normalize_request(payload)
         query = normalized["query"]
         if not query:
@@ -42,18 +82,30 @@ class ShoppingBackend:
         )
         recommendations = recommend_products(
             query=query,
-            products=_filter_products(products, normalized.get("avoid", [])),
+            products=_filter_products(
+                products,
+                infer_exclusion_terms(normalized),
+                normalized.get("must_have"),
+            ),
             budget=normalized["budget"],
             evidence_snippets=evidence_snippets,
             top_n=normalized["limit"],
+            intent_type=normalized.get("intent_type"),
+            sort_key=normalized.get("sort_key"),
+            sort_direction=normalized.get("sort_direction"),
         )
-        query_id = self.analytics_store.record_assist(
-            query_text=query,
-            budget=normalized["budget"],
-            category=normalized["category"],
-            evidence_snippets=evidence_snippets,
-            recommendations=recommendations,
-        )
+        recommendations = self._attach_short_links(recommendations)
+        query_id: Optional[str] = None
+        try:
+            query_id = self.analytics_store.record_assist(
+                query_text=query,
+                budget=normalized["budget"],
+                category=normalized["category"],
+                evidence_snippets=evidence_snippets,
+                recommendations=recommendations,
+            )
+        except Exception as exc:
+            log_event("analytics_error", stage="record_assist", query=query, error=str(exc))
         return build_assist_response(
             normalized=normalized,
             search_plan=search_plan,
@@ -65,9 +117,12 @@ class ShoppingBackend:
         urls = payload.get("urls") or payload.get("coupangUrls") or []
         if not isinstance(urls, list) or not urls:
             raise BackendError(HTTPStatus.BAD_REQUEST, "'urls' must be a non-empty list")
+        invalid_urls = [url for url in urls if not validate_deeplink_url(str(url), self.allowed_deeplink_hosts)]
+        if invalid_urls:
+            raise BackendError(HTTPStatus.BAD_REQUEST, "Only approved Coupang URLs may be shortened")
         if hasattr(self.adapter, "deeplink"):
             response = self.adapter.deeplink(urls)
-            return {"ok": True, "data": response}
+            return {"ok": True, "data": self._attach_short_links_to_deeplink_response(response)}
         raise BackendError(HTTPStatus.NOT_IMPLEMENTED, "Adapter does not support deeplink().")
 
     def record_event(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -83,7 +138,38 @@ class ShoppingBackend:
         return {"ok": True, "event_id": event_id}
 
     def summary(self) -> Dict[str, Any]:
-        return self.analytics_store.get_summary()
+        summary = self.analytics_store.get_summary()
+        try:
+            if self.shortener:
+                summary.update(self.shortener.get_summary())
+            else:
+                summary.setdefault("total_short_links", 0)
+                summary.setdefault("total_short_link_clicks", 0)
+        except Exception as exc:
+            log_event("shortener_error", stage="summary", error=str(exc))
+            summary.setdefault("total_short_links", 0)
+            summary.setdefault("total_short_link_clicks", 0)
+        summary["economics"] = build_economics_summary(summary)
+        return summary
+
+    def resolve_short_link(self, slug: str) -> Optional[str]:
+        if hasattr(self.shortener, "resolve"):
+            try:
+                target = self.shortener.resolve(slug)
+                if target and not validate_deeplink_url(target, self.allowed_deeplink_hosts):
+                    log_event("shortener_error", stage="resolve_invalid_target", slug=slug, target=target)
+                    return None
+                return target
+            except Exception as exc:
+                log_event("shortener_error", stage="resolve", slug=slug, error=str(exc))
+        return None
+
+    def record_short_link_click(self, slug: str) -> None:
+        if hasattr(self.shortener, "record_click"):
+            try:
+                self.shortener.record_click(slug)
+            except Exception as exc:
+                log_event("shortener_error", stage="record_click", slug=slug, error=str(exc))
 
     def _search_products(self, *, query: str, search_plan: List[str]) -> List[Dict[str, Any]]:
         if hasattr(self.adapter, "search"):
@@ -98,55 +184,185 @@ class ShoppingBackend:
             return list(deduped.values())
         raise BackendError(HTTPStatus.INTERNAL_SERVER_ERROR, "Adapter must define search() or search_products().")
 
+    def _attach_short_links(self, recommendations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not self.shortener:
+            return recommendations
+        enriched: List[Dict[str, Any]] = []
+        for item in recommendations:
+            original = item.get("deeplink", "")
+            shortened = original
+            if original and validate_deeplink_url(original, self.allowed_deeplink_hosts):
+                try:
+                    shortened = self.shortener.shorten(original)
+                except Exception as exc:
+                    log_event("shortener_error", stage="shorten_recommendation", error=str(exc))
+            elif original:
+                log_event("shortener_error", stage="shorten_recommendation_invalid_target", target=original)
+            enriched.append(
+                {
+                    **item,
+                    "short_deeplink": shortened,
+                }
+            )
+        return enriched
+
+    def _attach_short_links_to_deeplink_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.shortener:
+            return response
+        data = response.get("data")
+        if not isinstance(data, list):
+            return response
+        rewritten = []
+        for item in data:
+            original = item.get("shortenUrl") or item.get("shortUrl") or item.get("url") or item.get("originalUrl")
+            shortened = original
+            if original and validate_deeplink_url(original, self.allowed_deeplink_hosts):
+                try:
+                    shortened = self.shortener.shorten(original)
+                except Exception as exc:
+                    log_event("shortener_error", stage="shorten_deeplink_response", error=str(exc))
+            elif original:
+                log_event("shortener_error", stage="shorten_deeplink_response_invalid_target", target=original)
+            rewritten.append(
+                {
+                    **item,
+                    "shortenedShareUrl": shortened,
+                }
+            )
+        return {**response, "data": rewritten}
+
 
 class _Handler(BaseHTTPRequestHandler):
     backend: ShoppingBackend
+    rate_limiter = build_rate_limiter_from_env()
+    public_rate_limiter = build_rate_limiter_for_mode(public=True, authenticated=False)
+    authenticated_rate_limiter = build_rate_limiter_for_mode(public=False, authenticated=True)
+    admin_rate_limiter = build_rate_limiter_for_mode(public=False, authenticated=False)
+    max_body_bytes = int(os.getenv("OPENCLAW_SHOPPING_MAX_BODY_BYTES", "65536"))
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        self._handle_request(head_only=True)
 
     def do_GET(self) -> None:  # noqa: N802
+        self._handle_request(head_only=False)
+
+    def _handle_request(self, *, head_only: bool) -> None:
+        request_id = generate_request_id()
+        remote_addr = normalize_client_ip(self.client_address[0] if self.client_address else None)
         try:
-            if self.path == "/healthz":
-                self._send_json(HTTPStatus.OK, self.backend.health())
+            if self.path.startswith("/s/"):
+                slug = self.path.split("/s/", 1)[1].split("?", 1)[0].strip()
+                target = self.backend.resolve_short_link(slug)
+                if not target:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Short link not found", "requestId": request_id})
+                    return
+                self.backend.record_short_link_click(slug)
+                self.send_response(HTTPStatus.FOUND)
+                self.send_header("X-Request-Id", request_id)
+                self.send_header("Location", target)
+                self.end_headers()
+                log_event("shortlink_redirect", request_id=request_id, slug=slug, remote_addr=remote_addr)
+                return
+            if self.path in ("/health", "/healthz"):
+                self._send_json(HTTPStatus.OK, {**self.backend.health(), "requestId": request_id}, head_only=head_only)
                 return
             if self.path == "/v1/admin/summary":
-                self._send_json(HTTPStatus.OK, self.backend.summary())
+                self._authorize(request_id=request_id, remote_addr=remote_addr)
+                self._send_json(HTTPStatus.OK, {**self.backend.summary(), "requestId": request_id}, head_only=head_only)
                 return
-            self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id}, head_only=head_only)
         except BackendError as exc:
-            self._send_json(exc.status, {"error": exc.message})
+            log_event("request_error", request_id=request_id, path=self.path, remote_addr=remote_addr, status=exc.status, error=exc.message)
+            self._send_json(exc.status, {"error": exc.message, "requestId": request_id}, head_only=head_only)
+        except Exception as exc:
+            log_event("request_error", request_id=request_id, path=self.path, remote_addr=remote_addr, status=500, error=str(exc))
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Internal server error", "requestId": request_id}, head_only=head_only)
 
     def do_POST(self) -> None:  # noqa: N802
+        request_id = generate_request_id()
+        remote_addr = normalize_client_ip(self.client_address[0] if self.client_address else None)
         try:
+            client_marker = self._authorize(request_id=request_id, remote_addr=remote_addr)
             payload = self._read_json()
             if self.path in ("/v1/assist", "/v1/recommendations"):
-                self._send_json(HTTPStatus.OK, self.backend.assist(payload))
+                response = self.backend.assist(payload)
+                log_event("assist_ok", request_id=request_id, path=self.path, remote_addr=remote_addr, client=client_marker)
+                self._send_json(HTTPStatus.OK, {**response, "requestId": request_id})
                 return
             if self.path == "/v1/events":
-                self._send_json(HTTPStatus.OK, self.backend.record_event(payload))
+                response = self.backend.record_event(payload)
+                log_event("event_ok", request_id=request_id, path=self.path, remote_addr=remote_addr, client=client_marker)
+                self._send_json(HTTPStatus.OK, {**response, "requestId": request_id})
                 return
             if self.path == "/v1/deeplinks":
-                self._send_json(HTTPStatus.OK, self.backend.deeplinks(payload))
+                response = self.backend.deeplinks(payload)
+                log_event("deeplinks_ok", request_id=request_id, path=self.path, remote_addr=remote_addr, client=client_marker)
+                self._send_json(HTTPStatus.OK, {**response, "requestId": request_id})
                 return
-            self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id})
         except BackendError as exc:
-            self._send_json(exc.status, {"error": exc.message})
+            log_event("request_error", request_id=request_id, path=self.path, remote_addr=remote_addr, status=exc.status, error=exc.message)
+            self._send_json(exc.status, {"error": exc.message, "requestId": request_id})
         except json.JSONDecodeError:
-            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Invalid JSON body"})
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Invalid JSON body", "requestId": request_id})
+        except Exception as exc:
+            log_event("request_error", request_id=request_id, path=self.path, remote_addr=remote_addr, status=500, error=str(exc))
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Internal server error", "requestId": request_id})
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
         return
 
     def _read_json(self) -> Dict[str, Any]:
-        content_length = int(self.headers.get("Content-Length", "0"))
+        raw_content_length = self.headers.get("Content-Length", "0")
+        try:
+            content_length = int(raw_content_length)
+        except (TypeError, ValueError) as exc:
+            raise BackendError(HTTPStatus.BAD_REQUEST, "Invalid Content-Length header") from exc
+        if content_length < 0:
+            raise BackendError(HTTPStatus.BAD_REQUEST, "Invalid Content-Length header")
+        if content_length > self.max_body_bytes:
+            raise BackendError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Request body too large")
         raw = self.rfile.read(content_length).decode("utf-8") if content_length else "{}"
         return json.loads(raw)
 
-    def _send_json(self, status: int, payload: Dict[str, Any]) -> None:
+    def _send_json(self, status: int, payload: Dict[str, Any], *, head_only: bool = False) -> None:
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
+        self.send_header("X-Request-Id", str(payload.get("requestId", "")))
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
-        self.wfile.write(encoded)
+        if not head_only:
+            self.wfile.write(encoded)
+
+    def _authorize(self, *, request_id: str, remote_addr: str) -> str:
+        api_tokens = shopping_api_tokens_from_env()
+        token = parse_bearer_token(self.headers.get("Authorization"))
+        client_id = self.headers.get("X-OpenClaw-Client-Id")
+        client_marker = summarize_client(remote_addr, client_id, token)
+        auth_required = shopping_auth_required_from_env()
+        allowlist = shopping_client_allowlist_from_env()
+        allowlist_enabled = shopping_client_allowlist_enabled_from_env()
+        allowlisted_client = is_client_allowlisted(client_id, allowlist, allowlist_enabled)
+        if allowlist_enabled and not allowlisted_client:
+            raise BackendError(HTTPStatus.FORBIDDEN, "Client is not allowlisted")
+        if auth_required and not api_tokens:
+            raise BackendError(HTTPStatus.UNAUTHORIZED, "API auth is required but no token is configured on the server")
+        if api_tokens and token not in api_tokens:
+            raise BackendError(HTTPStatus.UNAUTHORIZED, "Missing or invalid bearer token")
+        rate_limiter = self._pick_rate_limiter(token=token)
+        limiter_key = rate_limit_key(remote_addr, client_id, token, allowlisted_client=allowlisted_client)
+        if rate_limiter and not rate_limiter.allow(limiter_key):
+            raise BackendError(HTTPStatus.TOO_MANY_REQUESTS, "Rate limit exceeded")
+        log_event("request_authorized", request_id=request_id, path=self.path, remote_addr=remote_addr, client=client_marker)
+        return client_marker
+
+    def _pick_rate_limiter(self, *, token: Optional[str]):
+        if self.path == "/v1/admin/summary":
+            return self.admin_rate_limiter or self.rate_limiter
+        if token:
+            return self.authenticated_rate_limiter or self.rate_limiter
+        return self.public_rate_limiter or self.rate_limiter
 
 
 def _extract_products(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -165,8 +381,8 @@ def _extract_products(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return []
 
 
-def _filter_products(products: List[Dict[str, Any]], avoid_terms: List[str]) -> List[Dict[str, Any]]:
-    if not avoid_terms:
+def _filter_products(products: List[Dict[str, Any]], avoid_terms: List[str], include_terms: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    if not avoid_terms and not include_terms:
         return products
     filtered: List[Dict[str, Any]] = []
     for product in products:
@@ -174,8 +390,12 @@ def _filter_products(products: List[Dict[str, Any]], avoid_terms: List[str]) -> 
             [
                 str(product.get("productName") or product.get("title") or ""),
                 str(product.get("brand") or product.get("vendor") or ""),
+                str(product.get("categoryName") or ""),
             ]
         )
+        lowered_haystack = haystack.lower()
+        if include_terms and not all(term.lower() in lowered_haystack for term in include_terms):
+            continue
         if any(term and term in haystack for term in avoid_terms):
             continue
         filtered.append(product)
@@ -199,9 +419,24 @@ def _normalize_evidence_snippets(items: List[Any]) -> List[Dict[str, Any]]:
     return normalized
 
 
-def build_server(*, host: str, port: int, adapter: Any, db_path: str) -> ThreadingHTTPServer:
-    analytics_store = AnalyticsStore(db_path)
-    backend = ShoppingBackend(adapter=adapter, analytics_store=analytics_store)
+def build_server(
+    *,
+    host: str,
+    port: int,
+    adapter: Any,
+    db_path: str,
+    shortener: Optional[UrlShortener] = None,
+    public_base_url: Optional[str] = None,
+    allowed_deeplink_hosts: Optional[List[str]] = None,
+) -> ThreadingHTTPServer:
+    analytics_store = build_analytics_store_from_env(db_path=db_path)
+    resolved_public_base_url = public_base_url or f"http://{host}:{port}"
+    backend = ShoppingBackend(
+        adapter=adapter,
+        analytics_store=analytics_store,
+        shortener=shortener or _build_shortener_from_env(db_path=db_path, public_base_url=resolved_public_base_url),
+        allowed_deeplink_hosts=allowed_deeplink_hosts or _load_allowed_deeplink_hosts(),
+    )
     handler = type("OpenClawRequestHandler", (_Handler,), {"backend": backend})
     return ThreadingHTTPServer((host, port), handler)
 
@@ -215,15 +450,20 @@ def serve_in_thread(server: ThreadingHTTPServer) -> threading.Thread:
 def build_backend_from_env() -> ShoppingBackend:
     db_path = os.getenv("OPENCLAW_SHOPPING_DB_PATH", ".data/openclaw-shopping.sqlite3")
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
+    public_base_url = os.getenv("OPENCLAW_SHOPPING_PUBLIC_BASE_URL", "http://127.0.0.1:8765")
     return ShoppingBackend(
         adapter=CoupangPartnersClient.from_env(),
-        analytics_store=AnalyticsStore(db_path),
+        analytics_store=build_analytics_store_from_env(db_path=db_path),
+        shortener=_build_shortener_from_env(db_path=db_path, public_base_url=public_base_url),
+        allowed_deeplink_hosts=_load_allowed_deeplink_hosts(),
     )
 
 
 def run_server(host: Optional[str] = None, port: Optional[int] = None) -> None:
-    resolved_host = host or os.getenv("OPENCLAW_SHOPPING_HOST", "127.0.0.1")
-    resolved_port = port or int(os.getenv("OPENCLAW_SHOPPING_PORT", "8765"))
+    resolved_host = host or os.getenv("OPENCLAW_SHOPPING_HOST", "0.0.0.0")
+    resolved_port = port or int(os.getenv("PORT") or os.getenv("OPENCLAW_SHOPPING_PORT", "8765"))
+    default_public_base_url = f"http://127.0.0.1:{resolved_port}"
+    os.environ.setdefault("OPENCLAW_SHOPPING_PUBLIC_BASE_URL", default_public_base_url)
     backend = build_backend_from_env()
     handler = type("OpenClawRequestHandler", (_Handler,), {"backend": backend})
     server = ThreadingHTTPServer((resolved_host, resolved_port), handler)
@@ -231,6 +471,27 @@ def run_server(host: Optional[str] = None, port: Optional[int] = None) -> None:
         server.serve_forever()
     finally:
         server.server_close()
+
+def _build_shortener_from_env(*, db_path: str, public_base_url: str) -> Optional[UrlShortener]:
+    provider = (os.getenv("OPENCLAW_SHOPPING_SHORTENER") or "").strip().lower()
+    if provider in ("", "builtin", "local"):
+        return BuiltinShortener(db_path=db_path, public_base_url=public_base_url)
+    if provider in ("firestore", "gcp"):
+        project_id = os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("OPENCLAW_GCP_PROJECT") or ""
+        return FirestoreShortener(
+            project_id=project_id,
+            public_base_url=public_base_url,
+            collection=os.getenv("OPENCLAW_SHORT_LINKS_COLLECTION", "short_links"),
+            database=os.getenv("OPENCLAW_FIRESTORE_DATABASE", "(default)"),
+            access_token=os.getenv("OPENCLAW_GCP_ACCESS_TOKEN"),
+            emulator_host=os.getenv("FIRESTORE_EMULATOR_HOST"),
+        )
+    return None
+
+
+def _load_allowed_deeplink_hosts() -> List[str]:
+    raw = os.getenv("OPENCLAW_SHOPPING_ALLOWED_DEEPLINK_HOSTS", "coupang.com,link.coupang.com,www.coupang.com")
+    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 if __name__ == "__main__":
