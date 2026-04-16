@@ -13,6 +13,7 @@
 ## 언어
 
 - English README: [README.md](README.md)
+- OpenClaw 설치/사용 가이드: [OPENCLAW-INSTALL.ko.md](OPENCLAW-INSTALL.ko.md)
 
 ## 현재 포함된 기능
 
@@ -29,6 +30,8 @@
 ## 공개 사용 경로
 
 일반 사용자나 OpenClaw 클라이언트는 `COUPANG_ACCESS_KEY`, `COUPANG_SECRET_KEY`를 설정할 필요가 없습니다. 공개 사용 경로는 hosted 서비스 `https://a.retn.kr` 입니다.
+
+OpenClaw 설치와 실제 사용자 안내 문구는 [OPENCLAW-INSTALL.ko.md](OPENCLAW-INSTALL.ko.md)를 참고하세요.
 
 ## 빠른 시작
 
