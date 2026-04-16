@@ -20,6 +20,7 @@ Set these in the OpenClaw runtime environment:
 ## Required behavior
 
 - Default to the hosted backend `https://a.retn.kr`
+- Force stale localhost overrides back onto `https://a.retn.kr` in the default beta path
 - Never require beta users to set `COUPANG_ACCESS_KEY` or `COUPANG_SECRET_KEY`
 - Keep link generation server-side
 - Always include a direct purchase link when recommendations are returned
@@ -27,11 +28,12 @@ Set these in the OpenClaw runtime environment:
 
 ## Local override rule
 
-Only operators should override the backend for local testing.
+Only operators should override the backend for local testing, and only with the explicit non-production escape hatch.
 
 Example:
 
 ```bash
+export OPENCLAW_SHOPPING_ALLOW_NON_PROD_BACKEND="true"
 export OPENCLAW_SHOPPING_BASE_URL="http://127.0.0.1:9883"
 export OPENCLAW_SHOPPING_API_TOKEN="local-dev-token"
 ```

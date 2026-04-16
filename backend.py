@@ -267,7 +267,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, {**self.backend.health(), "requestId": request_id}, head_only=head_only)
                 return
             if self.path == "/v1/admin/summary":
-                self._authorize(request_id=request_id, remote_addr=remote_addr)
+                if not _operator_routes_enabled():
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id}, head_only=head_only)
+                    return
+                self._authorize_internal(request_id=request_id, remote_addr=remote_addr)
                 self._send_json(HTTPStatus.OK, {**self.backend.summary(), "requestId": request_id}, head_only=head_only)
                 return
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id}, head_only=head_only)
@@ -282,19 +285,36 @@ class _Handler(BaseHTTPRequestHandler):
         request_id = generate_request_id()
         remote_addr = normalize_client_ip(self.client_address[0] if self.client_address else None)
         try:
-            client_marker = self._authorize(request_id=request_id, remote_addr=remote_addr)
             payload = self._read_json()
-            if self.path in ("/v1/assist", "/v1/recommendations"):
+            if self.path in ("/v1/public/assist", "/v1/public/recommendations"):
+                client_marker = self._authorize_public(request_id=request_id, remote_addr=remote_addr)
                 response = self.backend.assist(payload)
                 log_event("assist_ok", request_id=request_id, path=self.path, remote_addr=remote_addr, client=client_marker)
                 self._send_json(HTTPStatus.OK, {**response, "requestId": request_id})
                 return
-            if self.path == "/v1/events":
+            if self.path in ("/v1/assist", "/v1/recommendations", "/internal/v1/assist", "/internal/v1/recommendations"):
+                if not _operator_routes_enabled():
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id})
+                    return
+                client_marker = self._authorize_internal(request_id=request_id, remote_addr=remote_addr)
+                response = self.backend.assist(payload)
+                log_event("assist_ok", request_id=request_id, path=self.path, remote_addr=remote_addr, client=client_marker)
+                self._send_json(HTTPStatus.OK, {**response, "requestId": request_id})
+                return
+            if self.path in ("/v1/events", "/internal/v1/events"):
+                if not _operator_routes_enabled():
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id})
+                    return
+                client_marker = self._authorize_internal(request_id=request_id, remote_addr=remote_addr)
                 response = self.backend.record_event(payload)
                 log_event("event_ok", request_id=request_id, path=self.path, remote_addr=remote_addr, client=client_marker)
                 self._send_json(HTTPStatus.OK, {**response, "requestId": request_id})
                 return
-            if self.path == "/v1/deeplinks":
+            if self.path in ("/v1/deeplinks", "/internal/v1/deeplinks"):
+                if not _operator_routes_enabled():
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id})
+                    return
+                client_marker = self._authorize_internal(request_id=request_id, remote_addr=remote_addr)
                 response = self.backend.deeplinks(payload)
                 log_event("deeplinks_ok", request_id=request_id, path=self.path, remote_addr=remote_addr, client=client_marker)
                 self._send_json(HTTPStatus.OK, {**response, "requestId": request_id})
@@ -335,7 +355,21 @@ class _Handler(BaseHTTPRequestHandler):
         if not head_only:
             self.wfile.write(encoded)
 
-    def _authorize(self, *, request_id: str, remote_addr: str) -> str:
+    def _authorize_public(self, *, request_id: str, remote_addr: str) -> str:
+        client_id = self.headers.get("X-OpenClaw-Client-Id")
+        allowlist = shopping_client_allowlist_from_env()
+        allowlist_enabled = shopping_client_allowlist_enabled_from_env()
+        if allowlist_enabled and not is_client_allowlisted(client_id, allowlist, allowlist_enabled):
+            raise BackendError(HTTPStatus.FORBIDDEN, "Client is not allowlisted")
+        client_marker = summarize_client(remote_addr, client_id, None)
+        rate_limiter = self.public_rate_limiter or self.rate_limiter
+        limiter_key = rate_limit_key(remote_addr, client_id, None, allowlisted_client=False)
+        if rate_limiter and not rate_limiter.allow(limiter_key):
+            raise BackendError(HTTPStatus.TOO_MANY_REQUESTS, "Rate limit exceeded")
+        log_event("request_authorized", request_id=request_id, path=self.path, remote_addr=remote_addr, client=client_marker)
+        return client_marker
+
+    def _authorize_internal(self, *, request_id: str, remote_addr: str) -> str:
         api_tokens = shopping_api_tokens_from_env()
         token = parse_bearer_token(self.headers.get("Authorization"))
         client_id = self.headers.get("X-OpenClaw-Client-Id")
@@ -350,16 +384,18 @@ class _Handler(BaseHTTPRequestHandler):
             raise BackendError(HTTPStatus.UNAUTHORIZED, "API auth is required but no token is configured on the server")
         if api_tokens and token not in api_tokens:
             raise BackendError(HTTPStatus.UNAUTHORIZED, "Missing or invalid bearer token")
-        rate_limiter = self._pick_rate_limiter(token=token)
+        rate_limiter = self._pick_rate_limiter(token=token, internal=True)
         limiter_key = rate_limit_key(remote_addr, client_id, token, allowlisted_client=allowlisted_client)
         if rate_limiter and not rate_limiter.allow(limiter_key):
             raise BackendError(HTTPStatus.TOO_MANY_REQUESTS, "Rate limit exceeded")
         log_event("request_authorized", request_id=request_id, path=self.path, remote_addr=remote_addr, client=client_marker)
         return client_marker
 
-    def _pick_rate_limiter(self, *, token: Optional[str]):
+    def _pick_rate_limiter(self, *, token: Optional[str], internal: bool):
         if self.path == "/v1/admin/summary":
             return self.admin_rate_limiter or self.rate_limiter
+        if not internal:
+            return self.public_rate_limiter or self.rate_limiter
         if token:
             return self.authenticated_rate_limiter or self.rate_limiter
         return self.public_rate_limiter or self.rate_limiter
@@ -492,6 +528,13 @@ def _build_shortener_from_env(*, db_path: str, public_base_url: str) -> Optional
 def _load_allowed_deeplink_hosts() -> List[str]:
     raw = os.getenv("OPENCLAW_SHOPPING_ALLOWED_DEEPLINK_HOSTS", "coupang.com,link.coupang.com,www.coupang.com")
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _operator_routes_enabled() -> bool:
+    value = (os.getenv("OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES") or "").strip().lower()
+    if not value:
+        return True
+    return value in {"1", "true", "yes", "on"}
 
 
 if __name__ == "__main__":

@@ -28,8 +28,9 @@ Hosted shopping copilot for OpenClaw.
 
 - This skill never exposes Coupang credentials.
 - This skill defaults to the hosted backend at `https://a.retn.kr`.
-- Only override the backend when the operator explicitly requests local or custom backend testing.
-- When the operator configures backend auth, this skill should send `OPENCLAW_SHOPPING_API_TOKEN` as a bearer token.
+- Closed beta traffic is pinned to `https://a.retn.kr` unless the operator explicitly enables `OPENCLAW_SHOPPING_ALLOW_NON_PROD_BACKEND=true`.
+- Public skill traffic should use the hosted public gateway path without requiring an operator bearer token.
+- When the operator explicitly enables `OPENCLAW_SHOPPING_USE_INTERNAL_API=true`, this skill should send `OPENCLAW_SHOPPING_API_TOKEN` as a bearer token.
 - When returning recommendations, preserve the affiliate disclosure text.
 - When returning recommendations, always include the action-ready affiliate link for each recommended item. Prefer `short_deeplink`, then `deeplink`.
 
@@ -64,7 +65,7 @@ python3 {baseDir}/scripts/openclaw-shopping-skill.py deeplinks \
 
 1. Ask for the user’s actual shopping constraints.
 2. Start with `recommend` for both recommendation-style and direct search-style shopping requests.
-3. Prefer the hosted backend from `OPENCLAW_SHOPPING_BASE_URL`; do not invent or fall back to `127.0.0.1:8765` unless the operator explicitly says to use a local backend.
+3. Prefer the hosted backend from `OPENCLAW_SHOPPING_BASE_URL`; in closed beta, stale localhost overrides must still resolve to `https://a.retn.kr`.
 4. If no backend env is set, use the hosted default `https://a.retn.kr`.
 5. Present the best 1–3 recommendations with evidence, risks, and direct purchase links.
 6. Use `deeplinks` only when the user wants action-ready links.
@@ -80,7 +81,5 @@ python3 {baseDir}/scripts/openclaw-shopping-skill.py deeplinks \
 
 The hosted backend should support:
 
-- `POST /v1/assist`
-- `POST /v1/deeplinks`
-- `POST /v1/events`
+- `POST /v1/public/assist`
 - `GET /health`

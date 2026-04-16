@@ -11,15 +11,16 @@ from typing import Any, Dict, List, Optional
 from urllib import error, parse, request
 
 DEFAULT_TIMEOUT_SECONDS = 30
-DEFAULT_PATH = "/v1/assist"
 DEFAULT_HOSTED_BACKEND = "https://a.retn.kr"
+DEFAULT_PUBLIC_PATH = "/v1/public/assist"
+DEFAULT_INTERNAL_PATH = "/internal/v1/assist"
 
 
 class CliError(RuntimeError):
     """Raised when the CLI cannot complete the backend request."""
 
 
-def _base_url_from_env() -> str | None:
+def _base_url_from_env() -> Optional[str]:
     return (
         os.getenv("OPENCLAW_SHOPPING_BASE_URL")
         or os.getenv("OPENCLAW_SHOPPING_BACKEND_URL")
@@ -28,7 +29,7 @@ def _base_url_from_env() -> str | None:
     )
 
 
-def _auth_token_from_env() -> str | None:
+def _auth_token_from_env() -> Optional[str]:
     singular = (os.getenv("OPENCLAW_SHOPPING_API_TOKEN") or "").strip()
     if singular:
         return singular
@@ -43,6 +44,32 @@ def _allowed_backend_hosts() -> tuple[str, ...]:
     hosts = [host.strip().lower() for host in env_hosts.split(",") if host.strip()]
     hosts.extend(["a.retn.kr", "127.0.0.1", "localhost"])
     return tuple(dict.fromkeys(hosts))
+
+
+def _allow_non_prod_backend() -> bool:
+    value = (os.getenv("OPENCLAW_SHOPPING_ALLOW_NON_PROD_BACKEND") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _use_internal_api() -> bool:
+    value = (os.getenv("OPENCLAW_SHOPPING_USE_INTERNAL_API") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _normalize_backend_base_url(url: Optional[str]) -> str:
+    candidate = (url or "").strip() or DEFAULT_HOSTED_BACKEND
+    if _allow_non_prod_backend():
+        _validate_backend_url(candidate)
+        return candidate.rstrip("/")
+
+    try:
+        parsed = parse.urlparse(candidate)
+    except ValueError:
+        return DEFAULT_HOSTED_BACKEND
+
+    if parsed.scheme == "https" and (parsed.hostname or "").lower() == "a.retn.kr":
+        return candidate.rstrip("/")
+    return DEFAULT_HOSTED_BACKEND
 
 
 def _validate_backend_url(url: str) -> None:
@@ -61,6 +88,17 @@ def _validate_backend_url(url: str) -> None:
         raise CliError(f"Backend URL must use https outside localhost: {url}")
     if not any(host == allowed or host.endswith(f".{allowed}") for allowed in _allowed_backend_hosts()):
         raise CliError(f"Backend host is not approved: {host}")
+
+
+def _perform_request(url: str, body: bytes, headers: Dict[str, str], timeout: int) -> str:
+    http_request = request.Request(
+        url=url,
+        data=body,
+        headers=headers,
+        method="POST",
+    )
+    with request.urlopen(http_request, timeout=timeout) as response:
+        return response.read().decode("utf-8")
 
 
 def default_timeout_seconds(parser: argparse.ArgumentParser) -> int:
@@ -150,26 +188,20 @@ def build_payload(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def request_assist(base_url: str, payload: Dict[str, Any], timeout: int) -> Any:
-    normalized_base_url = base_url.rstrip("/")
+    normalized_base_url = _normalize_backend_base_url(base_url)
     _validate_backend_url(normalized_base_url)
-    url = f"{normalized_base_url}{DEFAULT_PATH}"
+    path = DEFAULT_INTERNAL_PATH if _use_internal_api() else DEFAULT_PUBLIC_PATH
+    url = f"{normalized_base_url}{path}"
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     auth_token = _auth_token_from_env()
     client_id = os.getenv("OPENCLAW_SHOPPING_CLIENT_ID", "local-cli")
-    if auth_token:
+    if auth_token and _use_internal_api():
         headers["Authorization"] = f"Bearer {auth_token}"
     headers["X-OpenClaw-Client-Id"] = client_id
-    http_request = request.Request(
-        url=url,
-        data=body,
-        headers=headers,
-        method="POST",
-    )
 
     try:
-        with request.urlopen(http_request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8")
+        raw = _perform_request(url, body, headers, timeout)
     except error.HTTPError as exc:
         raw = exc.read().decode("utf-8")
         detail = raw or exc.reason

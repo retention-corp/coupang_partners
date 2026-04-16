@@ -38,6 +38,10 @@ class CliTests(unittest.TestCase):
     def test_cli_defaults_to_hosted_backend(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(openclaw_cli._base_url_from_env(), "https://a.retn.kr")
+            self.assertEqual(
+                openclaw_cli._normalize_backend_base_url("http://127.0.0.1:9883"),
+                "https://a.retn.kr",
+            )
 
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -58,6 +62,7 @@ class CliTests(unittest.TestCase):
     def test_bin_cli_returns_json(self):
         env = dict(os.environ)
         env["OPENCLAW_SHOPPING_BASE_URL"] = self.base_url
+        env["OPENCLAW_SHOPPING_ALLOW_NON_PROD_BACKEND"] = "true"
         completed = subprocess.run(
             [
                 sys.executable,
@@ -76,6 +81,24 @@ class CliTests(unittest.TestCase):
         )
         payload = json.loads(completed.stdout)
         self.assertEqual(payload["best_fit"]["product_id"], "11")
+
+    def test_bin_cli_routes_localhost_override_back_to_hosted_backend(self):
+        with mock.patch.object(openclaw_cli, "DEFAULT_HOSTED_BACKEND", self.base_url):
+            with mock.patch.dict(os.environ, {}, clear=True):
+                payload = openclaw_cli.request_assist(
+                    "http://127.0.0.1:9883",
+                    {"query": "30만원 이하 무선청소기"},
+                    30,
+                )
+
+        self.assertEqual(payload["best_fit"]["product_id"], "11")
+
+    def test_bin_cli_allows_non_prod_backend_only_with_explicit_env(self):
+        with mock.patch.dict(os.environ, {"OPENCLAW_SHOPPING_ALLOW_NON_PROD_BACKEND": "true"}, clear=True):
+            self.assertEqual(
+                openclaw_cli._normalize_backend_base_url("http://127.0.0.1:9883"),
+                "http://127.0.0.1:9883",
+            )
 
 
 if __name__ == "__main__":

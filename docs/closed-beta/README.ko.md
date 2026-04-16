@@ -13,6 +13,7 @@
 - 기본 backend는 `https://a.retn.kr` 입니다.
 - beta 참여자는 `OPENCLAW_SHOPPING_API_TOKEN`만 받으면 됩니다.
 - 로컬 backend는 운영자 개발용입니다. beta 사용자는 건드리지 않는 것이 맞습니다.
+- stale한 `127.0.0.1` 설정이 남아 있어도 closed beta 경로에서는 `https://a.retn.kr`로 강제됩니다.
 
 ## 사용자 설정
 

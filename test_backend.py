@@ -76,6 +76,7 @@ class BackendTests(unittest.TestCase):
         self._saved_env = {
             "OPENCLAW_SHOPPING_API_TOKENS": os.environ.get("OPENCLAW_SHOPPING_API_TOKENS"),
             "OPENCLAW_SHOPPING_API_TOKEN": os.environ.get("OPENCLAW_SHOPPING_API_TOKEN"),
+            "OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES": os.environ.get("OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES"),
             "OPENCLAW_SHOPPING_PUBLIC_BASE_URL": os.environ.get("OPENCLAW_SHOPPING_PUBLIC_BASE_URL"),
             "OPENCLAW_SHOPPING_CLIENT_ALLOWLIST_ENABLED": os.environ.get("OPENCLAW_SHOPPING_CLIENT_ALLOWLIST_ENABLED"),
             "OPENCLAW_SHOPPING_CLIENT_ALLOWLIST": os.environ.get("OPENCLAW_SHOPPING_CLIENT_ALLOWLIST"),
@@ -88,6 +89,7 @@ class BackendTests(unittest.TestCase):
         }
         for key in self._saved_env:
             os.environ.pop(key, None)
+        os.environ["OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES"] = "true"
         _Handler.rate_limiter = RateLimiter(window_seconds=60, max_requests=30)
         _Handler.public_rate_limiter = None
         _Handler.authenticated_rate_limiter = None
@@ -116,7 +118,7 @@ class BackendTests(unittest.TestCase):
         self.assertTrue(health["ok"])
 
         assist_request = request.Request(
-            f"{self.base_url}/v1/assist",
+            f"{self.base_url}/v1/public/assist",
             data=json.dumps(
                 {
                     "query": "30만원 이하 무선청소기, 원룸용",
@@ -132,7 +134,7 @@ class BackendTests(unittest.TestCase):
         self.assertTrue(assist["best_fit"]["short_deeplink"].startswith("https://go.example.com/s/"))
 
         event_request = request.Request(
-            f"{self.base_url}/v1/events",
+            f"{self.base_url}/internal/v1/events",
             data=json.dumps({"event_type": "deeplink_clicked", "query_id": assist["query_id"]}).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -141,7 +143,7 @@ class BackendTests(unittest.TestCase):
         self.assertTrue(event["ok"])
 
         deeplink_request = request.Request(
-            f"{self.base_url}/v1/deeplinks",
+            f"{self.base_url}/internal/v1/deeplinks",
             data=json.dumps({"urls": ["https://www.coupang.com/vp/products/1"]}).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -164,7 +166,7 @@ class BackendTests(unittest.TestCase):
 
     def test_short_link_redirect(self):
         assist_request = request.Request(
-            f"{self.base_url}/v1/assist",
+            f"{self.base_url}/v1/public/assist",
             data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -187,7 +189,7 @@ class BackendTests(unittest.TestCase):
     def test_assist_requires_bearer_token_when_configured(self):
         os.environ["OPENCLAW_SHOPPING_API_TOKENS"] = "token-123"
         request_obj = request.Request(
-            f"{self.base_url}/v1/assist",
+            f"{self.base_url}/internal/v1/assist",
             data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -201,7 +203,7 @@ class BackendTests(unittest.TestCase):
     def test_assist_accepts_valid_bearer_token(self):
         os.environ["OPENCLAW_SHOPPING_API_TOKENS"] = "token-123"
         request_obj = request.Request(
-            f"{self.base_url}/v1/assist",
+            f"{self.base_url}/internal/v1/assist",
             data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
@@ -218,7 +220,7 @@ class BackendTests(unittest.TestCase):
         os.environ.pop("OPENCLAW_SHOPPING_API_TOKENS", None)
         os.environ["OPENCLAW_SHOPPING_API_TOKEN"] = "token-123"
         request_obj = request.Request(
-            f"{self.base_url}/v1/assist",
+            f"{self.base_url}/internal/v1/assist",
             data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
@@ -230,13 +232,13 @@ class BackendTests(unittest.TestCase):
         response = json.loads(request.urlopen(request_obj, timeout=5).read().decode("utf-8"))
         self.assertEqual(response["best_fit"]["product_id"], "1")
 
-    def test_public_base_url_requires_auth_even_when_token_env_missing(self):
+    def test_internal_path_requires_auth_even_when_public_base_url_is_non_local(self):
         os.environ.pop("OPENCLAW_SHOPPING_API_TOKENS", None)
         os.environ.pop("OPENCLAW_SHOPPING_API_TOKEN", None)
         os.environ["OPENCLAW_SHOPPING_PUBLIC_BASE_URL"] = "https://a.retn.kr"
 
         request_obj = request.Request(
-            f"{self.base_url}/v1/assist",
+            f"{self.base_url}/internal/v1/assist",
             data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -249,7 +251,7 @@ class BackendTests(unittest.TestCase):
     def test_rate_limit_returns_429(self):
         _Handler.rate_limiter = RateLimiter(window_seconds=60, max_requests=1)
         request_obj = request.Request(
-            f"{self.base_url}/v1/assist",
+            f"{self.base_url}/v1/public/assist",
             data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
             headers={"Content-Type": "application/json", "X-OpenClaw-Client-Id": "burst"},
             method="POST",
@@ -265,7 +267,21 @@ class BackendTests(unittest.TestCase):
         os.environ["OPENCLAW_SHOPPING_CLIENT_ALLOWLIST_ENABLED"] = "true"
         os.environ["OPENCLAW_SHOPPING_CLIENT_ALLOWLIST"] = "approved-client"
         request_obj = request.Request(
-            f"{self.base_url}/v1/assist",
+            f"{self.base_url}/internal/v1/assist",
+            data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-OpenClaw-Client-Id": "blocked-client"},
+            method="POST",
+        )
+        with self.assertRaises(error.HTTPError) as ctx:
+            request.urlopen(request_obj, timeout=5)
+        self.assertEqual(ctx.exception.code, 403)
+        ctx.exception.close()
+
+    def test_public_allowlist_blocks_unknown_client(self):
+        os.environ["OPENCLAW_SHOPPING_CLIENT_ALLOWLIST_ENABLED"] = "true"
+        os.environ["OPENCLAW_SHOPPING_CLIENT_ALLOWLIST"] = "approved-client"
+        request_obj = request.Request(
+            f"{self.base_url}/v1/public/assist",
             data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
             headers={"Content-Type": "application/json", "X-OpenClaw-Client-Id": "blocked-client"},
             method="POST",
@@ -281,7 +297,7 @@ class BackendTests(unittest.TestCase):
         _Handler.authenticated_rate_limiter = RateLimiter(window_seconds=60, max_requests=2)
 
         public_request = request.Request(
-            f"{self.base_url}/v1/assist",
+            f"{self.base_url}/v1/public/assist",
             data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
             headers={"Content-Type": "application/json", "X-OpenClaw-Client-Id": "public-client"},
             method="POST",
@@ -294,7 +310,7 @@ class BackendTests(unittest.TestCase):
 
         os.environ["OPENCLAW_SHOPPING_API_TOKENS"] = "token-123"
         auth_request = request.Request(
-            f"{self.base_url}/v1/assist",
+            f"{self.base_url}/internal/v1/assist",
             data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
@@ -310,9 +326,9 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(auth_ctx.exception.code, 429)
         auth_ctx.exception.close()
 
-    def test_deeplinks_reject_non_coupang_urls(self):
+    def test_internal_deeplinks_reject_non_coupang_urls(self):
         request_obj = request.Request(
-            f"{self.base_url}/v1/deeplinks",
+            f"{self.base_url}/internal/v1/deeplinks",
             data=json.dumps({"urls": ["https://evil.example.com/phish"]}).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -325,7 +341,7 @@ class BackendTests(unittest.TestCase):
 
     def test_assist_rejects_invalid_constraints_type(self):
         request_obj = request.Request(
-            f"{self.base_url}/v1/assist",
+            f"{self.base_url}/v1/public/assist",
             data=json.dumps({"query": "30만원 이하 무선청소기", "constraints": "bad"}).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -337,7 +353,7 @@ class BackendTests(unittest.TestCase):
 
     def test_assist_rejects_large_request_body(self):
         request_obj = request.Request(
-            f"{self.base_url}/v1/assist",
+            f"{self.base_url}/v1/public/assist",
             data=b"{" + b"x" * 70000 + b"}",
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -349,7 +365,7 @@ class BackendTests(unittest.TestCase):
 
     def test_assist_rejects_invalid_evidence_snippet_member_type(self):
         request_obj = request.Request(
-            f"{self.base_url}/v1/assist",
+            f"{self.base_url}/v1/public/assist",
             data=json.dumps({"query": "30만원 이하 무선청소기", "evidence_snippets": [123]}).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -399,6 +415,30 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(response["best_fit"]["product_id"], "2")
         self.assertEqual(response["best_fit"]["comparison"]["label"], "10m")
         self.assertIn("길이 표기가 가장 긴 후보", response["summary"])
+
+    def test_public_assist_ignores_internal_token_requirement(self):
+        os.environ["OPENCLAW_SHOPPING_API_TOKENS"] = "token-123"
+        request_obj = request.Request(
+            f"{self.base_url}/v1/public/assist",
+            data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-OpenClaw-Client-Id": "public-client"},
+            method="POST",
+        )
+        response = json.loads(request.urlopen(request_obj, timeout=5).read().decode("utf-8"))
+        self.assertEqual(response["best_fit"]["product_id"], "1")
+
+    def test_operator_routes_can_be_disabled(self):
+        os.environ["OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES"] = "false"
+        request_obj = request.Request(
+            f"{self.base_url}/internal/v1/assist",
+            data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": "Bearer token-123"},
+            method="POST",
+        )
+        with self.assertRaises(error.HTTPError) as ctx:
+            request.urlopen(request_obj, timeout=5)
+        self.assertEqual(ctx.exception.code, 404)
+        ctx.exception.close()
 
 
 if __name__ == "__main__":

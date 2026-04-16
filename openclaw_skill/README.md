@@ -15,10 +15,12 @@ shopping search requests such as "쿠팡에서 AUX 선 제일 긴거 찾아줘".
 ## Required setup
 
 - Hosted default backend is `https://a.retn.kr`.
-- Override `OPENCLAW_SHOPPING_BASE_URL` or pass `--backend` only when you intentionally run a different backend.
-- Set `OPENCLAW_SHOPPING_API_TOKEN` when the backend requires bearer auth.
+- Closed beta clients are pinned to `https://a.retn.kr` even if a stale local backend override is present.
+- Public skill calls are tokenless by default and use the hosted public assist path.
 - Keep Coupang secrets server-side.
 - Preserve affiliate disclosure wherever links are shown.
+- Only operators should set `OPENCLAW_SHOPPING_ALLOW_NON_PROD_BACKEND=true` for local or staging backend tests.
+- Only operators should set `OPENCLAW_SHOPPING_USE_INTERNAL_API=true` together with a bearer token.
 
 ## Example
 
@@ -30,14 +32,18 @@ python3 scripts/openclaw-shopping-skill.py recommend \
   --limit 3
 ```
 
-The `recommend` command posts to `/v1/recommendations`, which is supported as an alias of `/v1/assist` on the hosted backend.
-Prefer `OPENCLAW_SHOPPING_BASE_URL` or the hosted production URL over `127.0.0.1` unless you are intentionally testing a local backend.
+The `recommend` command posts to `/v1/public/assist` on the hosted backend by default.
+Closed beta traffic should always resolve to the hosted production URL.
+
+The `deeplinks` command is operator-only and uses internal routes. Public recommendation responses already include action-ready links.
 
 ## Local development override
 
-Use a local backend only for operator testing.
+Use a local backend only for operator testing, and only with the explicit non-production escape hatch.
 
 ```bash
+export OPENCLAW_SHOPPING_ALLOW_NON_PROD_BACKEND="true"
 export OPENCLAW_SHOPPING_BASE_URL="http://127.0.0.1:9883"
 export OPENCLAW_SHOPPING_API_TOKEN="replace-with-local-dev-token"
+export OPENCLAW_SHOPPING_USE_INTERNAL_API="true"
 ```

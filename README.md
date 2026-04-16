@@ -77,13 +77,17 @@ python3 backend.py
 Public endpoints:
 
 - `GET /health`
-- `POST /v1/assist`
-- `POST /v1/events`
+- `POST /v1/public/assist`
+- `POST /v1/public/events`
+- `POST /v1/public/deeplinks`
 
 Protected endpoints require:
 
-- `Authorization: Bearer <token>` when `OPENCLAW_SHOPPING_API_TOKENS` is configured
+- `Authorization: Bearer <token>` when calling internal or admin endpoints
 - optional `X-OpenClaw-Client-Id` for caller identification
+- `POST /internal/v1/assist`
+- `POST /internal/v1/events`
+- `POST /internal/v1/deeplinks`
 - `GET /v1/admin/summary`
 
 Optional hardening env vars:
@@ -96,8 +100,11 @@ Optional hardening env vars:
 
 Client compatibility notes:
 
-- Thin clients accept both `OPENCLAW_SHOPPING_API_TOKEN` and `OPENCLAW_SHOPPING_API_TOKENS`
+- Thin clients default to tokenless public gateway paths under `https://a.retn.kr`
+- Thin clients accept both `OPENCLAW_SHOPPING_API_TOKEN` and `OPENCLAW_SHOPPING_API_TOKENS` for operator-only internal calls
 - Thin clients accept `OPENCLAW_SHOPPING_BASE_URL`, `OPENCLAW_SHOPPING_BACKEND_URL`, or `SHOPPING_COPILOT_BASE_URL`
+- Thin clients in the default beta path are pinned to `https://a.retn.kr`; localhost or other non-production overrides are ignored unless `OPENCLAW_SHOPPING_ALLOW_NON_PROD_BACKEND=true`
+- Set `OPENCLAW_SHOPPING_USE_INTERNAL_API=true` only for operator/staging flows that should hit `/internal/v1/*`
 
 Default protection:
 
@@ -114,9 +121,9 @@ export OPENCLAW_SHOPPING_SHORTENER="builtin"
 export OPENCLAW_SHOPPING_PUBLIC_BASE_URL="https://go.example.com"
 ```
 
-If `OPENCLAW_SHOPPING_PUBLIC_BASE_URL` points at a non-local host, also set
-`OPENCLAW_SHOPPING_API_TOKEN` or `OPENCLAW_SHOPPING_API_TOKENS`, because the
-backend treats that as a protected deployment shape.
+If you are testing internal/operator flows against a non-local host, also set
+`OPENCLAW_SHOPPING_API_TOKEN` or `OPENCLAW_SHOPPING_API_TOKENS` together with
+`OPENCLAW_SHOPPING_USE_INTERNAL_API=true`.
 
 Local development is intentionally a separate override path. Public docs and install defaults should keep pointing at `https://a.retn.kr`.
 
@@ -141,11 +148,10 @@ Notes:
 - If `FIRESTORE_EMULATOR_HOST` is set, the backend talks to the emulator without OAuth.
 - If Firestore short-link generation fails, the backend now falls back to the original affiliate URL instead of dropping the request.
 
-Sample request:
+Public sample request:
 
 ```bash
-curl -sS -X POST https://a.retn.kr/v1/assist \
-  -H 'Authorization: Bearer replace-with-random-long-token' \
+curl -sS -X POST https://a.retn.kr/v1/public/assist \
   -H 'Content-Type: application/json' \
   -d '{
     "query": "30만원 이하 무선청소기, 원룸용",
@@ -164,7 +170,6 @@ CLI bridge example:
 
 ```bash
 export OPENCLAW_SHOPPING_BASE_URL="https://a.retn.kr"
-export OPENCLAW_SHOPPING_API_TOKEN="replace-with-random-long-token"
 
 python3 bin/openclaw_shopping.py \
   "30만원 이하 무선청소기, 원룸용" \
@@ -172,6 +177,16 @@ python3 bin/openclaw_shopping.py \
   --must-have 원룸 \
   --avoid 대형 \
   --evidence-snippet "리뷰: 자취방에서 쓰기 좋은 보조 청소기"
+```
+
+Operator/internal example:
+
+```bash
+export OPENCLAW_SHOPPING_BASE_URL="https://a.retn.kr"
+export OPENCLAW_SHOPPING_API_TOKEN="replace-with-random-long-token"
+export OPENCLAW_SHOPPING_USE_INTERNAL_API="true"
+
+python3 bin/openclaw_shopping.py "30만원 이하 무선청소기, 원룸용"
 ```
 
 ## OpenClaw integration expectations
