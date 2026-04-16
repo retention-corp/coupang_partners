@@ -15,6 +15,7 @@ from recommendation import (
     normalize_request,
     recommend_products,
 )
+from product_page_evidence import enrich_products_with_page_evidence
 from security import (
     build_rate_limiter_for_mode,
     build_rate_limiter_from_env,
@@ -79,6 +80,11 @@ class ShoppingBackend:
         products = self._search_products(
             query=query,
             search_plan=search_plan,
+        )
+        products = enrich_products_with_page_evidence(
+            products,
+            max_products=_page_evidence_max_products_from_env(),
+            timeout_seconds=_page_evidence_timeout_seconds_from_env(),
         )
         recommendations = recommend_products(
             query=query,
@@ -528,6 +534,24 @@ def _build_shortener_from_env(*, db_path: str, public_base_url: str) -> Optional
 def _load_allowed_deeplink_hosts() -> List[str]:
     raw = os.getenv("OPENCLAW_SHOPPING_ALLOWED_DEEPLINK_HOSTS", "coupang.com,link.coupang.com,www.coupang.com")
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _page_evidence_max_products_from_env() -> int:
+    raw = os.getenv("OPENCLAW_SHOPPING_PAGE_EVIDENCE_MAX_PRODUCTS", "3")
+    try:
+        value = int(raw)
+    except ValueError:
+        return 3
+    return max(0, min(value, 5))
+
+
+def _page_evidence_timeout_seconds_from_env() -> int:
+    raw = os.getenv("OPENCLAW_SHOPPING_PAGE_EVIDENCE_TIMEOUT_SECONDS", "2")
+    try:
+        value = int(raw)
+    except ValueError:
+        return 2
+    return max(1, min(value, 5))
 
 
 def _operator_routes_enabled() -> bool:

@@ -90,6 +90,28 @@ class RecommendationTests(unittest.TestCase):
         self.assertIn("원룸", recommendations[0]["rationale"])
         self.assertEqual(recommendations[0]["evidence"]["confidence"], "high")
 
+    def test_recommend_products_raises_confidence_with_landing_page_evidence(self):
+        products = [
+            {
+                "productId": 1,
+                "productName": "특대형 KF94 마스크",
+                "productPrice": 7900,
+                "productUrl": "https://example.com/1",
+                "page_title": "특대형 빅사이즈 KF94 마스크 30매",
+                "page_description": "대두도 편하게 쓸 수 있는 특대형 KF94 마스크",
+                "page_snippets": ["얼큰이 고객도 압박감이 덜한 넉넉한 핏"],
+                "page_facts": ["Landing page snippet count: 1"],
+            }
+        ]
+
+        recommendations = recommend_products(
+            query="대두가 써도 안 아픈 KF94 마스크 추천",
+            products=products,
+        )
+
+        self.assertEqual(recommendations[0]["evidence"]["confidence"], "high")
+        self.assertIn("Landing page snippet count: 1", recommendations[0]["evidence"]["facts"])
+
     def test_recommend_products_filters_generic_irrelevant_results(self):
         products = [
             {

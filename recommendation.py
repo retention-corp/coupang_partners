@@ -70,6 +70,12 @@ def normalize_product(raw_product: Dict[str, Any]) -> Dict[str, Any]:
         "review_count": raw_product.get("review_count") or raw_product.get("reviewCount") or 0,
         "length_m": length_m,
         "deeplink": deeplink,
+        "description": raw_product.get("description") or "",
+        "page_title": raw_product.get("page_title") or "",
+        "page_description": raw_product.get("page_description") or "",
+        "page_snippets": list(raw_product.get("page_snippets") or []),
+        "page_facts": list(raw_product.get("page_facts") or []),
+        "page_url": raw_product.get("page_url") or "",
         "metadata": raw_product,
     }
 
