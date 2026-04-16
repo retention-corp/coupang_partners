@@ -10,6 +10,10 @@ It should also be discoverable when the user does not explicitly type
 `shopping-copilot으로`, as long as the request clearly looks like shopping or
 product-finding intent.
 
+This includes taste-sensitive product requests such as books, masks, gadgets,
+or other items where the user says things like `내 스타일`, `내 취향`, or
+`나한테 맞는`.
+
 ## Files
 
 - `SKILL.md` — operator-facing OpenClaw instructions
@@ -46,6 +50,8 @@ Natural-language examples the router should pick up even without a skill prefix:
 - `머리가 큰 사람도 고통 없이 쓸 수 있는 미세먼지 마스크 찾아줘`
 - `대두가 써도 덜 아픈 KF94 마스크 추천해줘`
 - `쿠팡에서 AUX 선 제일 긴 거 찾아줘`
+- `쿠팡에서 요즘 볼만한 자기계발서 3개만 찾아줘. 내 스타일을 알아보고 추천해라`
+- `내 취향에 맞는 책 3권만 쿠팡에서 골라줘`
 
 ## Local development override
 

@@ -9,10 +9,12 @@ description: >-
   product. Strong triggers include 쇼핑 추천, 상품 추천, 뭐 사야 해, 골라줘,
   추천해줘, 찾아줘, 검색해줘, 보여줘, 링크 줘, 어디서 사, 쿠팡에서, 가성비,
   최저가, 제일 긴, 제일 싼, 평점 높은, 리뷰 많은, big size/대두/큰 머리,
-  착용감, 편하게 쓸 수 있는, 마스크, 청소기, 양말, 케이블, 오트밀크 같은
+  착용감, 편하게 쓸 수 있는, 마스크, 청소기, 양말, 케이블, 오트밀크, 책,
+  도서, 자기계발서, 소설, 경제경영, 내 스타일, 내 취향, 나한테 맞는 같은
   product-seeking phrases. Example shopping queries include "30만원 이하
   무선청소기, 소음 적고 원룸용", "쿠팡에서 AUX 선 제일 긴거 제품 찾아줘",
-  and "머리가 큰 사람도 고통 없이 쓸 수 있는 미세먼지 마스크 찾아줘".
+  "머리가 큰 사람도 고통 없이 쓸 수 있는 미세먼지 마스크 찾아줘", and
+  "쿠팡에서 요즘 볼만한 자기계발서 3개만 찾아줘. 내 스타일을 알아보고 추천해라".
 metadata: {"clawdbot":{"emoji":"🛒","requires":{"bins":["python3"]}}}
 ---
 
@@ -29,6 +31,8 @@ Hosted shopping copilot for OpenClaw.
 - Matching direct Korean shopping intents without requiring explicit command syntax
 - Working even when the user does not explicitly say `shopping-copilot으로`, as long as the request is clearly a shopping/product-finding request
 - Handling comparison-style requests such as longest, cheapest, highest-rated, and most-reviewed products
+- Handling book and content-like product requests when the user is still clearly asking what to buy on Coupang
+- Handling style-aware requests such as `내 스타일`, `내 취향`, `나한테 맞는` as shopping personalization rather than generic life advice
 
 ## Hard rules
 
@@ -75,6 +79,7 @@ python3 {baseDir}/scripts/openclaw-shopping-skill.py deeplinks \
 4. If no backend env is set, use the hosted default `https://a.retn.kr`.
 5. Present the best 1–3 recommendations with evidence, risks, and direct purchase links.
 6. Use `deeplinks` only when the user wants action-ready links.
+7. If the user asks for books or other taste-sensitive products, treat that as a shopping query first and personalize within the shopping flow instead of falling back to generic advice.
 
 ## Trigger examples
 
@@ -85,6 +90,8 @@ python3 {baseDir}/scripts/openclaw-shopping-skill.py deeplinks \
 - `머리가 큰 사람도 고통 없이 쓸 수 있는 미세먼지 마스크 찾아줘`
 - `대두가 써도 안 아픈 KF94 마스크 추천해줘`
 - `브레빌 870으로 라떼 만들 오트밀크 골라줘`
+- `쿠팡에서 요즘 볼만한 자기계발서 3개만 찾아줘. 내 스타일을 알아보고 추천해라`
+- `내 취향에 맞는 책 3권만 쿠팡에서 골라줘`
 
 ## Backend compatibility
 

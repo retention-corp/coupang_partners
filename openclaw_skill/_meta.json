@@ -1,5 +1,5 @@
 {
   "slug": "shopping-copilot",
   "version": "0.1.0",
-  "description": "Hosted shopping copilot for natural-language product finding, recommendations, and Coupang shopping requests backed by Coupang Partners."
+  "description": "Hosted shopping copilot for natural-language Coupang product finding, recommendations, and style-aware shopping requests such as books, masks, gadgets, and everyday products."
 }
