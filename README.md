@@ -22,12 +22,10 @@ This repository now ships:
 - Public backend contract artifacts under `openclaw_skill/`
 - Tests for backend, recommendation, analytics, CLI, and client flows
 
-## Coupang API environment variables
+## Public Usage
 
-```bash
-export COUPANG_ACCESS_KEY="your-access-key"
-export COUPANG_SECRET_KEY="your-secret-key"
-```
+Public/OpenClaw clients do not need `COUPANG_ACCESS_KEY` or `COUPANG_SECRET_KEY`.
+They should call the hosted service at `https://a.retn.kr`.
 
 ## Quick start
 
@@ -64,7 +62,7 @@ Hosted-first recommendation:
 - Local backend execution is for operator development only
 - Affiliate deeplink creation should stay server-side so published links keep the operator's attribution
 
-Run it with:
+Operator-only local backend run:
 
 ```bash
 export COUPANG_ACCESS_KEY="your-access-key"
@@ -73,6 +71,8 @@ export OPENCLAW_SHOPPING_API_TOKENS="replace-with-random-long-token"
 export OPENCLAW_SHOPPING_DB_PATH=".data/openclaw-shopping.sqlite3"
 python3 backend.py
 ```
+
+Do not present the operator-only local backend flow as the default path for public users.
 
 Public endpoints:
 
