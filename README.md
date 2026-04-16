@@ -1,5 +1,7 @@
 # Coupang Partners Client and OpenClaw Shopping Backend
 
+- Korean README: [README.ko.md](README.ko.md)
+
 Minimal Python tooling for Coupang Partners integrations using only the standard library.
 
 This repository now ships:
