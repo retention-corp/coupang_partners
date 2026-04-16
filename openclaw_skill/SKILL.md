@@ -4,10 +4,15 @@ description: >-
   Hosted shopping copilot that turns a natural-language shopping request into
   evidence-backed recommendations and affiliate deeplinks. Use when the user
   wants an agent to reason about product fit or directly search shopping
-  results. Trigger when the user asks for 쇼핑 추천, 상품 추천, 뭐 사야 해,
-  골라줘, 추천해줘, 찾아줘, 검색해줘, 보여줘, 링크 줘, or gives a natural-language
-  shopping query such as "30만원 이하 무선청소기, 소음 적고 원룸용" or
-  "쿠팡에서 AUX 선 제일 긴거 제품 찾아줘".
+  results. Trigger even without the explicit `shopping-copilot` prefix when the
+  user is clearly asking to buy, compare, search, or recommend a physical
+  product. Strong triggers include 쇼핑 추천, 상품 추천, 뭐 사야 해, 골라줘,
+  추천해줘, 찾아줘, 검색해줘, 보여줘, 링크 줘, 어디서 사, 쿠팡에서, 가성비,
+  최저가, 제일 긴, 제일 싼, 평점 높은, 리뷰 많은, big size/대두/큰 머리,
+  착용감, 편하게 쓸 수 있는, 마스크, 청소기, 양말, 케이블, 오트밀크 같은
+  product-seeking phrases. Example shopping queries include "30만원 이하
+  무선청소기, 소음 적고 원룸용", "쿠팡에서 AUX 선 제일 긴거 제품 찾아줘",
+  and "머리가 큰 사람도 고통 없이 쓸 수 있는 미세먼지 마스크 찾아줘".
 metadata: {"clawdbot":{"emoji":"🛒","requires":{"bins":["python3"]}}}
 ---
 
@@ -22,6 +27,7 @@ Hosted shopping copilot for OpenClaw.
 - Asking the hosted backend for grounded recommendations
 - Returning structured JSON with evidence, risks, and affiliate links
 - Matching direct Korean shopping intents without requiring explicit command syntax
+- Working even when the user does not explicitly say `shopping-copilot으로`, as long as the request is clearly a shopping/product-finding request
 - Handling comparison-style requests such as longest, cheapest, highest-rated, and most-reviewed products
 
 ## Hard rules
@@ -76,6 +82,9 @@ python3 {baseDir}/scripts/openclaw-shopping-skill.py deeplinks \
 - `쿠팡에서 3.5mm 연장선 긴 거 보여줘`
 - `쿠팡에서 제일 싼 무선 마우스 찾아줘`
 - `무선청소기 추천해줘`
+- `머리가 큰 사람도 고통 없이 쓸 수 있는 미세먼지 마스크 찾아줘`
+- `대두가 써도 안 아픈 KF94 마스크 추천해줘`
+- `브레빌 870으로 라떼 만들 오트밀크 골라줘`
 
 ## Backend compatibility
 

@@ -6,6 +6,10 @@ Coupang credentials, analytics, and recommendation learning.
 The skill is meant to cover both recommendation-style prompts and direct
 shopping search requests such as "쿠팡에서 AUX 선 제일 긴거 찾아줘".
 
+It should also be discoverable when the user does not explicitly type
+`shopping-copilot으로`, as long as the request clearly looks like shopping or
+product-finding intent.
+
 ## Files
 
 - `SKILL.md` — operator-facing OpenClaw instructions
@@ -36,6 +40,12 @@ The `recommend` command posts to `/v1/public/assist` on the hosted backend by de
 Closed beta traffic should always resolve to the hosted production URL.
 
 The `deeplinks` command is operator-only and uses internal routes. Public recommendation responses already include action-ready links.
+
+Natural-language examples the router should pick up even without a skill prefix:
+
+- `머리가 큰 사람도 고통 없이 쓸 수 있는 미세먼지 마스크 찾아줘`
+- `대두가 써도 덜 아픈 KF94 마스크 추천해줘`
+- `쿠팡에서 AUX 선 제일 긴 거 찾아줘`
 
 ## Local development override
 
