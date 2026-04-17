@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"gh auth status 2>&1 | grep -i scope && echo \\\"---\\\" && gh repo delete simpsonkorea/coupang_partners --yes 2>&1\",\"description\":\"Check scopes and delete\"}",
-  "error": "Exit code 1\n  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'\n---\nHTTP 403: Must have admin rights to Repository. (https://api.github.com/repos/simpsonkorea/coupang_partners)\nThis API operation needs the \"delete_repo\" scope. To request it, run:  gh auth refresh -h github.com -s delete_repo",
-  "timestamp": "2026-04-17T01:29:35.414Z",
-  "retry_count": 1
-}
