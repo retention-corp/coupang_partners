@@ -515,6 +515,8 @@ def _extract_products(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     if isinstance(payload, list):
         return payload
     data = payload.get("data") if isinstance(payload, dict) else None
+    if isinstance(data, list):
+        return data
     if isinstance(data, dict):
         for key in ("products", "productData", "items"):
             if isinstance(data.get(key), list):
