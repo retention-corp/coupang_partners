@@ -11,10 +11,14 @@ description: >-
   최저가, 제일 긴, 제일 싼, 평점 높은, 리뷰 많은, big size/대두/큰 머리,
   착용감, 편하게 쓸 수 있는, 마스크, 청소기, 양말, 케이블, 오트밀크, 책,
   도서, 자기계발서, 소설, 경제경영, 내 스타일, 내 취향, 나한테 맞는 같은
-  product-seeking phrases. Example shopping queries include "30만원 이하
-  무선청소기, 소음 적고 원룸용", "쿠팡에서 AUX 선 제일 긴거 제품 찾아줘",
-  "머리가 큰 사람도 고통 없이 쓸 수 있는 미세먼지 마스크 찾아줘", and
-  "쿠팡에서 요즘 볼만한 자기계발서 3개만 찾아줘. 내 스타일을 알아보고 추천해라".
+  product-seeking phrases. Also triggers on 골드박스, 오늘 특가, 지금 특가,
+  타임딜, 당일 특가, 베스트, 인기상품, 카테고리 베스트, 전자제품 베스트,
+  로켓배송만, 로켓만, 로켓으로, 로켓 상품만. Example shopping queries include
+  "30만원 이하 무선청소기, 소음 적고 원룸용", "쿠팡에서 AUX 선 제일 긴거
+  제품 찾아줘", "머리가 큰 사람도 고통 없이 쓸 수 있는 미세먼지 마스크
+  찾아줘", "쿠팡에서 요즘 볼만한 자기계발서 3개만 찾아줘. 내 스타일을 알아보고
+  추천해라", "오늘 골드박스 뭐야?", "전자제품 베스트 보여줘",
+  "로켓배송만 무선청소기 10만원 이하".
 metadata: {"clawdbot":{"emoji":"🛒","requires":{"bins":["python3"]}}}
 ---
 
@@ -63,6 +67,41 @@ python3 {baseDir}/scripts/openclaw-shopping-skill.py recommend \
   --limit 5
 ```
 
+### 3) Structured search (rocket filter / budget / sort)
+
+```bash
+python3 {baseDir}/scripts/openclaw-shopping-skill.py search \
+  --backend https://a.retn.kr \
+  --keyword "무선청소기" \
+  --rocket-only \
+  --max-price 300000 \
+  --sort SALE \
+  --limit 5
+```
+
+- `--sort` options: `SIM` (관련성), `SALE` (인기), `LOW` (낮은가격), `HIGH` (높은가격)
+- Use `search` when the user says "로켓배송만", "로켓만", or specifies a budget ceiling alongside a keyword.
+
+### 4) Goldbox — today's deals
+
+```bash
+python3 {baseDir}/scripts/openclaw-shopping-skill.py goldbox \
+  --backend https://a.retn.kr
+```
+
+- Use when the user says "골드박스", "오늘 특가", "지금 특가", "타임딜", "당일 특가".
+
+### 5) Category best products
+
+```bash
+python3 {baseDir}/scripts/openclaw-shopping-skill.py best \
+  --backend https://a.retn.kr \
+  --category "전자제품"
+```
+
+- Supported category names: 전자제품, 생활/주방, 패션, 식품/음료, 스포츠/레저, 뷰티
+- Use when the user says "베스트", "인기상품", or "카테고리 베스트".
+
 ### 2) Build deeplinks
 
 ```bash
@@ -73,13 +112,24 @@ python3 {baseDir}/scripts/openclaw-shopping-skill.py deeplinks \
 
 ## Suggested agent workflow
 
-1. Ask for the user’s actual shopping constraints.
-2. Start with `recommend` for both recommendation-style and direct search-style shopping requests.
-3. Prefer the hosted backend from `OPENCLAW_SHOPPING_BASE_URL`; in closed beta, stale localhost overrides must still resolve to `https://a.retn.kr`.
-4. If no backend env is set, use the hosted default `https://a.retn.kr`.
-5. Present the best 1–3 recommendations with evidence, risks, and direct purchase links.
-6. Use `deeplinks` only when the user wants action-ready links.
-7. If the user asks for books or other taste-sensitive products, treat that as a shopping query first and personalize within the shopping flow instead of falling back to generic advice.
+Route based on intent first:
+
+| User says | Command to use |
+|---|---|
+| "골드박스", "오늘 특가", "타임딜" | `goldbox` |
+| "베스트", "카테고리 베스트", "인기상품" | `best --category ...` |
+| "로켓배송만", "로켓만" + keyword | `search --rocket-only` |
+| keyword + budget ceiling | `search --max-price` |
+| keyword + "인기순"/"리뷰많은" | `search --sort SALE` |
+| keyword + "최저가"/"제일 싼" | `search --sort LOW` |
+| Natural language recommendation | `recommend` |
+
+1. For goldbox/best: call directly, no clarifying questions needed.
+2. For search: extract keyword, rocket preference, price ceiling, and sort intent from the user’s text.
+3. For recommend: ask for constraints if missing (budget, use case, size).
+4. Prefer the hosted backend from `OPENCLAW_SHOPPING_BASE_URL`; default is `https://a.retn.kr`.
+5. Always include `short_deeplink` (prefer over `deeplink`) for each result.
+6. If the user asks for books or taste-sensitive products, use `recommend` and personalize within the shopping flow.
 
 ## Trigger examples
 

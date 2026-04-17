@@ -10,6 +10,18 @@ DEFAULT_HOSTED_BACKEND = "https://a.retn.kr"
 DEFAULT_ASSIST_PATH = "/v1/public/assist"
 DEFAULT_INTERNAL_ASSIST_PATH = "/internal/v1/assist"
 DEFAULT_INTERNAL_DEEPLINK_PATH = "/internal/v1/deeplinks"
+DEFAULT_SEARCH_PATH = "/v1/public/search"
+DEFAULT_GOLDBOX_PATH = "/v1/public/goldbox"
+DEFAULT_BEST_PATH = "/v1/public/best"
+
+CATEGORY_MAP = {
+    "전자제품": "1001", "전자": "1001", "electronics": "1001",
+    "생활": "1010", "주방": "1010", "생활/주방": "1010", "생활주방": "1010",
+    "패션": "1015", "의류": "1015", "fashion": "1015",
+    "식품": "1005", "음료": "1005", "식품/음료": "1005", "식품음료": "1005",
+    "스포츠": "1012", "레저": "1012", "스포츠/레저": "1012",
+    "뷰티": "1018", "화장품": "1018", "beauty": "1018",
+}
 
 
 def _backend_base_url():
@@ -85,32 +97,38 @@ def _validate_backend_url(url: str) -> None:
         raise RuntimeError(f"backend host is not approved: {host}")
 
 
-def _request_json(url: str, payload):
-    headers = {"Content-Type": "application/json"}
-    auth_token = _auth_token()
-    client_id = os.getenv("OPENCLAW_SHOPPING_CLIENT_ID", "openclaw-skill")
-    if auth_token and _use_internal_api():
-        headers["Authorization"] = f"Bearer {auth_token}"
-    headers["X-OpenClaw-Client-Id"] = client_id
-    req = request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers=headers,
-        method="POST",
-    )
-    with request.urlopen(req, timeout=20) as response:
-        return json.loads(response.read().decode("utf-8"))
-
-
-def _post_json(url: str, payload):
+def _http_json(url: str, *, method: str = "GET", payload=None):
     _validate_backend_url(url)
+    client_id = os.getenv("OPENCLAW_SHOPPING_CLIENT_ID", "openclaw-skill")
+    headers = {"X-OpenClaw-Client-Id": client_id}
+    body = None
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        auth_token = _auth_token()
+        if auth_token and _use_internal_api():
+            headers["Authorization"] = f"Bearer {auth_token}"
+        body = json.dumps(payload).encode("utf-8")
+    req = request.Request(url, data=body, headers=headers, method=method)
     try:
-        return _request_json(url, payload)
+        with request.urlopen(req, timeout=20) as response:
+            return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         detail = exc.read().decode("utf-8") or exc.reason
         raise RuntimeError(f"backend returned HTTP {exc.code}: {detail}") from exc
     except URLError as exc:
         raise RuntimeError(f"backend request failed: {exc.reason}") from exc
+
+
+def _post_json(url: str, payload):
+    return _http_json(url, method="POST", payload=payload)
+
+
+def _get_json(url: str):
+    return _http_json(url, method="GET")
+
+
+def _resolve_category_id(category: str) -> str:
+    return CATEGORY_MAP.get(category.strip().lower(), category.strip())
 
 
 def main() -> int:
@@ -129,6 +147,21 @@ def main() -> int:
     deeplinks.add_argument("--backend", default=_backend_base_url())
     deeplinks.add_argument("--url", action="append", required=True)
 
+    search_cmd = subparsers.add_parser("search")
+    search_cmd.add_argument("--backend", default=_backend_base_url())
+    search_cmd.add_argument("--keyword", required=True)
+    search_cmd.add_argument("--rocket-only", action="store_true", default=False)
+    search_cmd.add_argument("--max-price", type=int, default=None)
+    search_cmd.add_argument("--sort", default="SIM", choices=["SIM", "SALE", "LOW", "HIGH"])
+    search_cmd.add_argument("--limit", type=int, default=5)
+
+    goldbox_cmd = subparsers.add_parser("goldbox")
+    goldbox_cmd.add_argument("--backend", default=_backend_base_url())
+
+    best_cmd = subparsers.add_parser("best")
+    best_cmd.add_argument("--backend", default=_backend_base_url())
+    best_cmd.add_argument("--category", required=True, help="카테고리명 또는 ID (예: 전자제품, 뷰티, 1001)")
+
     args = parser.parse_args()
     backend_base_url = _normalize_backend_base_url(args.backend)
     if not backend_base_url:
@@ -146,10 +179,28 @@ def main() -> int:
             }
             assist_path = DEFAULT_INTERNAL_ASSIST_PATH if _use_internal_api() else DEFAULT_ASSIST_PATH
             result = _post_json(backend_base_url + assist_path, payload)
+        elif args.command == "deeplinks":
+            result = _post_json(backend_base_url + DEFAULT_INTERNAL_DEEPLINK_PATH, {"urls": args.url})
+        elif args.command == "search":
+            payload = {
+                "keyword": args.keyword,
+                "rocket_only": args.rocket_only,
+                "max_price": args.max_price,
+                "sort": args.sort,
+                "limit": args.limit,
+            }
+            result = _post_json(backend_base_url + DEFAULT_SEARCH_PATH, payload)
+        elif args.command == "goldbox":
+            result = _get_json(backend_base_url + DEFAULT_GOLDBOX_PATH)
+        elif args.command == "best":
+            category_id = _resolve_category_id(args.category)
+            result = _get_json(f"{backend_base_url}{DEFAULT_BEST_PATH}/{category_id}")
         else:
-            deeplink_path = DEFAULT_INTERNAL_DEEPLINK_PATH
-            result = _post_json(backend_base_url + deeplink_path, {"urls": args.url})
-        print(json.dumps({"ok": True, "data": result}, ensure_ascii=False))
+            result = _post_json(backend_base_url + DEFAULT_INTERNAL_DEEPLINK_PATH, {"urls": args.url})
+        output = {"ok": True, "data": result}
+        if isinstance(result, dict) and "disclosure" in result:
+            output["disclosure"] = result["disclosure"]
+        print(json.dumps(output, ensure_ascii=False))
         return 0
     except RuntimeError as exc:
         print(json.dumps({"ok": False, "error": {"message": str(exc)}}, ensure_ascii=False), file=sys.stderr)

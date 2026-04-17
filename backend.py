@@ -1,6 +1,7 @@
 import json
 import os
 import threading
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
@@ -9,6 +10,8 @@ from analytics import AnalyticsStore, build_analytics_store_from_env
 from client import CoupangPartnersClient
 from economics import build_economics_summary
 from recommendation import (
+    DISCLOSURE_TEXT,
+    _coerce_int as _coerce_int_value,
     build_assist_response,
     build_search_queries,
     infer_exclusion_terms,
@@ -130,6 +133,68 @@ class ShoppingBackend:
             response = self.adapter.deeplink(urls)
             return {"ok": True, "data": self._attach_short_links_to_deeplink_response(response)}
         raise BackendError(HTTPStatus.NOT_IMPLEMENTED, "Adapter does not support deeplink().")
+
+    def goldbox(self) -> Dict[str, Any]:
+        if not hasattr(self.adapter, "get_goldbox"):
+            raise BackendError(HTTPStatus.NOT_IMPLEMENTED, "Adapter does not support get_goldbox().")
+        raw = self.adapter.get_goldbox()
+        products = _extract_products(raw)
+        normalized = [_normalize_search_product(p) for p in products]
+        enriched = self._attach_short_links(normalized)
+        return {
+            "ok": True,
+            "data": {
+                "deals": enriched,
+                "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            },
+            "disclosure": DISCLOSURE_TEXT,
+        }
+
+    def search(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        keyword = (payload.get("keyword") or "").strip()
+        if not keyword:
+            raise BackendError(HTTPStatus.BAD_REQUEST, "'keyword' is required")
+        if len(keyword) > 200:
+            raise BackendError(HTTPStatus.BAD_REQUEST, "'keyword' must be 200 characters or fewer")
+        rocket_only = bool(payload.get("rocket_only", False))
+        max_price = _coerce_int_value(payload.get("max_price"))
+        sort = (payload.get("sort") or "SIM").upper()
+        if sort not in {"SIM", "SALE", "LOW", "HIGH"}:
+            sort = "SIM"
+        limit = max(1, min(int(payload.get("limit") or 5), 20))
+        raw = self.adapter.search_products(keyword=keyword, limit=min(limit * 4, 80))
+        products = _extract_products(raw)
+        if rocket_only:
+            products = [p for p in products if p.get("isRocket") or p.get("is_rocket")]
+        if max_price is not None:
+            products = [p for p in products if (p.get("productPrice") or p.get("salePrice") or p.get("price") or 0) <= max_price]
+        normalized = [_normalize_search_product(p) for p in products]
+        if sort == "LOW":
+            normalized.sort(key=lambda p: (p.get("price") is None, p.get("price") or float("inf")))
+        elif sort == "HIGH":
+            normalized.sort(key=lambda p: -(p.get("price") or 0))
+        elif sort == "SALE":
+            normalized.sort(key=lambda p: -(p.get("review_count") or 0))
+        normalized = normalized[:limit]
+        enriched = self._attach_short_links(normalized)
+        return {
+            "ok": True,
+            "data": {"keyword": keyword, "results": enriched, "total": len(enriched)},
+            "disclosure": DISCLOSURE_TEXT,
+        }
+
+    def best(self, category_id: str) -> Dict[str, Any]:
+        if not hasattr(self.adapter, "get_bestcategories"):
+            raise BackendError(HTTPStatus.NOT_IMPLEMENTED, "Adapter does not support get_bestcategories().")
+        raw = self.adapter.get_bestcategories(category_id)
+        products = _extract_products(raw)
+        normalized = [_normalize_search_product(p) for p in products]
+        enriched = self._attach_short_links(normalized)
+        return {
+            "ok": True,
+            "data": {"category_id": category_id, "products": enriched},
+            "disclosure": DISCLOSURE_TEXT,
+        }
 
     def record_event(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         event_type = (payload.get("event_type") or "").strip()
@@ -279,6 +344,25 @@ class _Handler(BaseHTTPRequestHandler):
                 self._authorize_internal(request_id=request_id, remote_addr=remote_addr)
                 self._send_json(HTTPStatus.OK, {**self.backend.summary(), "requestId": request_id}, head_only=head_only)
                 return
+            if self.path == "/v1/public/goldbox":
+                client_marker = self._authorize_public(request_id=request_id, remote_addr=remote_addr)
+                response = self.backend.goldbox()
+                log_event("goldbox_ok", request_id=request_id, remote_addr=remote_addr, client=client_marker)
+                self._send_json(HTTPStatus.OK, {**response, "requestId": request_id}, head_only=head_only)
+                return
+            if self.path.startswith("/v1/public/best/"):
+                category_id = self.path.split("/v1/public/best/", 1)[1].split("?", 1)[0].strip()
+                if not category_id:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": "category_id is required", "requestId": request_id}, head_only=head_only)
+                    return
+                if not category_id.isdigit():
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": "category_id must be numeric", "requestId": request_id}, head_only=head_only)
+                    return
+                client_marker = self._authorize_public(request_id=request_id, remote_addr=remote_addr)
+                response = self.backend.best(category_id)
+                log_event("best_ok", request_id=request_id, remote_addr=remote_addr, client=client_marker, category_id=category_id)
+                self._send_json(HTTPStatus.OK, {**response, "requestId": request_id}, head_only=head_only)
+                return
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id}, head_only=head_only)
         except BackendError as exc:
             log_event("request_error", request_id=request_id, path=self.path, remote_addr=remote_addr, status=exc.status, error=exc.message)
@@ -292,6 +376,12 @@ class _Handler(BaseHTTPRequestHandler):
         remote_addr = normalize_client_ip(self.client_address[0] if self.client_address else None)
         try:
             payload = self._read_json()
+            if self.path == "/v1/public/search":
+                client_marker = self._authorize_public(request_id=request_id, remote_addr=remote_addr)
+                response = self.backend.search(payload)
+                log_event("search_ok", request_id=request_id, remote_addr=remote_addr, client=client_marker)
+                self._send_json(HTTPStatus.OK, {**response, "requestId": request_id})
+                return
             if self.path in ("/v1/public/assist", "/v1/public/recommendations"):
                 client_marker = self._authorize_public(request_id=request_id, remote_addr=remote_addr)
                 response = self.backend.assist(payload)
@@ -405,6 +495,18 @@ class _Handler(BaseHTTPRequestHandler):
         if token:
             return self.authenticated_rate_limiter or self.rate_limiter
         return self.public_rate_limiter or self.rate_limiter
+
+
+def _normalize_search_product(product: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "title": product.get("productName") or product.get("title") or "",
+        "price": product.get("productPrice") or product.get("salePrice") or product.get("price"),
+        "is_rocket": bool(product.get("isRocket") or product.get("is_rocket")),
+        "is_free_shipping": bool(product.get("isFreeShipping") or product.get("is_free_shipping")),
+        "rating": product.get("ratingAverage") or product.get("rating") or 0,
+        "review_count": product.get("reviewCount") or product.get("review_count") or 0,
+        "deeplink": product.get("productUrl") or product.get("deeplink") or product.get("url") or "",
+    }
 
 
 def _extract_products(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
