@@ -161,8 +161,8 @@ class ShoppingBackend:
         sort = (payload.get("sort") or "SIM").upper()
         if sort not in {"SIM", "SALE", "LOW", "HIGH"}:
             sort = "SIM"
-        limit = max(1, min(int(payload.get("limit") or 5), 20))
-        raw = self.adapter.search_products(keyword=keyword, limit=min(limit * 4, 80))
+        limit = max(1, min(int(payload.get("limit") or 5), 10))
+        raw = self.adapter.search_products(keyword=keyword, limit=10)
         products = _extract_products(raw)
         if rocket_only:
             products = [p for p in products if p.get("isRocket") or p.get("is_rocket")]

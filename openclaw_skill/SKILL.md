@@ -99,7 +99,7 @@ python3 {baseDir}/scripts/openclaw-shopping-skill.py best \
   --category "전자제품"
 ```
 
-- Supported category names: 전자제품, 생활/주방, 패션, 식품/음료, 스포츠/레저, 뷰티
+- Supported category names: 여성패션, 남성패션, 유아동패션, 신발/패션잡화, 뷰티, 출산/유아동, 식품, 주방용품, 생활용품, 문구/오피스, 가전디지털 (전자제품), 스포츠/레저, 자동차용품
 - Use when the user says "베스트", "인기상품", or "카테고리 베스트".
 
 ### 2) Build deeplinks
