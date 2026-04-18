@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -104,10 +105,32 @@ def _validate_backend_url(url: str) -> None:
         raise RuntimeError(f"backend host is not approved: {host}")
 
 
+def _derive_client_id() -> str:
+    """Stable per-caller identifier for analytics replay.
+
+    Precedence: explicit env override → OpenClaw runtime var → hash(user@host).
+    Hashing avoids leaking the OS username into server-side logs while still
+    giving the same machine a stable tag across sessions. Falls back to the
+    literal "openclaw-skill" only when no signal at all is available.
+    """
+
+    explicit = (os.getenv("OPENCLAW_SHOPPING_CLIENT_ID") or "").strip()
+    if explicit:
+        return explicit[:128]
+    openclaw = (os.getenv("OPENCLAW_CLIENT_ID") or "").strip()
+    if openclaw:
+        return f"openclaw:{openclaw[:120]}"
+    user = (os.getenv("USER") or os.getenv("LOGNAME") or "").strip()
+    host = (os.getenv("HOSTNAME") or os.getenv("HOST") or "").strip()
+    if user or host:
+        digest = hashlib.sha256(f"{user}@{host}".encode("utf-8")).hexdigest()[:16]
+        return f"openclaw-skill-{digest}"
+    return "openclaw-skill"
+
+
 def _http_json(url: str, *, method: str = "GET", payload=None):
     _validate_backend_url(url)
-    client_id = os.getenv("OPENCLAW_SHOPPING_CLIENT_ID", "openclaw-skill")
-    headers = {"X-OpenClaw-Client-Id": client_id}
+    headers = {"X-OpenClaw-Client-Id": _derive_client_id()}
     body = None
     if payload is not None:
         headers["Content-Type"] = "application/json"
@@ -144,11 +167,22 @@ def main() -> int:
 
     recommend = subparsers.add_parser("recommend")
     recommend.add_argument("--backend", default=_backend_base_url())
-    recommend.add_argument("--query", required=True)
+    recommend.add_argument("--query", required=False, default="")
     recommend.add_argument("--price-max", type=int, default=None)
     recommend.add_argument("--limit", type=int, default=5)
     recommend.add_argument("--include-term", action="append", default=[])
     recommend.add_argument("--exclude-term", action="append", default=[])
+    recommend.add_argument(
+        "--vertical",
+        default="",
+        choices=["", "book"],
+        help="Route to a specialized vertical (e.g. 'book' → persona-aware librarian picks).",
+    )
+    recommend.add_argument(
+        "--persona-json",
+        default="",
+        help='JSON object with persona hints, e.g. \'{"interests":["엔지니어링"],"avoid_categories":["육아"]}\'',
+    )
 
     deeplinks = subparsers.add_parser("deeplinks")
     deeplinks.add_argument("--backend", default=_backend_base_url())
@@ -184,6 +218,16 @@ def main() -> int:
                     "avoid": args.exclude_term,
                 },
             }
+            if args.vertical:
+                payload["vertical"] = args.vertical
+            if args.persona_json:
+                try:
+                    persona = json.loads(args.persona_json)
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(f"--persona-json must be valid JSON: {exc}") from exc
+                if not isinstance(persona, dict):
+                    raise RuntimeError("--persona-json must decode to a JSON object")
+                payload["persona"] = persona
             assist_path = DEFAULT_INTERNAL_ASSIST_PATH if _use_internal_api() else DEFAULT_ASSIST_PATH
             result = _post_json(backend_base_url + assist_path, payload)
         elif args.command == "deeplinks":

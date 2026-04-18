@@ -131,6 +131,11 @@ Route based on intent first:
 5. Always include `short_deeplink` (prefer over `deeplink`) for each result.
 6. If the user asks for books or taste-sensitive products, use `recommend` and personalize within the shopping flow.
 7. For book requests (책/도서/사서 추천/베스트셀러), add `"vertical": "book"` to the assist payload. The backend runs book_reco (사서추천도서 + Data4Library + Naver) and maps recommendations to Coupang products; titles without a Coupang match are dropped rather than fabricated.
+8. For personalized book ranking, attach a `persona` object to the assist payload. Supported fields: `interests` (free-text tokens), `categories`, `authors`, `avoid_categories`, `korean_preference` (0–1), `engineering_weight` (0–1). Ranking will also replay the same `X-OpenClaw-Client-Id`'s recent queries to infer an implicit persona when explicit hints are thin. Examples:
+   - `{"vertical":"book","limit":5,"persona":{"interests":["엔지니어링","프로덕트"],"avoid_categories":["육아"]}}`
+   - `{"vertical":"book","limit":3,"persona":{"categories":["자기계발"],"authors":["자청","김승호"]}}`
+   - `{"vertical":"book","limit":5,"persona":{"korean_preference":0.8,"engineering_weight":1.0}}`
+   Each matched recommendation returns a `persona_signals` array explaining which signals fired (e.g. `[{"signal":"category:자기계발","weight":5.0}]`), so the assistant can narrate *why* a pick was made.
 
 ## Trigger examples
 
@@ -145,6 +150,9 @@ Route based on intent first:
 - `내 취향에 맞는 책 3권만 쿠팡에서 골라줘`
 - `사서 추천 도서 중에서 요즘 읽을만한거 뽑아줘`
 - `베스트셀러 소설 쿠팡에서 사려고 하는데 3권만 추천해줘`
+- `내 취향 업데이트하고 책 추천 다시 뽑아줘` (persona 페이로드 업데이트 후 assist 호출)
+- `다음에 읽을 책 3권 사서 추천에서 골라줘` (기본 trending 응답을 persona-aware ranking으로 재정렬)
+- `엔지니어링 책 중에 육아 주제는 빼고 추천해줘` (`persona.interests=["엔지니어링"]`, `avoid_categories=["육아"]` 조합)
 
 ## Backend compatibility
 
