@@ -74,6 +74,8 @@ class ShoppingBackend:
         payload_error = validate_payload_limits(payload)
         if payload_error:
             raise BackendError(HTTPStatus.BAD_REQUEST, payload_error)
+        if (payload.get("vertical") or "").strip().lower() == "book":
+            return self._book_assist(payload)
         normalized = normalize_request(payload)
         query = normalized["query"]
         if not query:
@@ -254,6 +256,42 @@ class ShoppingBackend:
                     deduped.setdefault(product_id, product)
             return list(deduped.values())
         raise BackendError(HTTPStatus.INTERNAL_SERVER_ERROR, "Adapter must define search() or search_products().")
+
+    def _book_assist(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        # Imported lazily so the book vertical never pulls its providers into cold paths.
+        from book_reco.backend_integration import book_assist
+
+        def _search(**kwargs: Any) -> Any:
+            return self.adapter.search_products(**kwargs)
+
+        def _shorten(url: str) -> str:
+            if self.shortener is None:
+                return url
+            return self.shortener.shorten(url)
+
+        def _validate_host(url: str) -> bool:
+            return validate_deeplink_url(url, self.allowed_deeplink_hosts)
+
+        response = book_assist(
+            payload,
+            search_products_fn=_search,
+            shorten_fn=_shorten if self.shortener else None,
+            validate_host_fn=_validate_host,
+            disclosure_text=DISCLOSURE_TEXT,
+        )
+
+        try:
+            self.analytics_store.record_assist(
+                query_text=response.get("query", ""),
+                budget=None,
+                category="book",
+                evidence_snippets=[],
+                recommendations=response.get("recommendations", []),
+            )
+        except Exception as exc:
+            log_event("analytics_error", stage="record_book_assist", error=str(exc))
+
+        return response
 
     def _attach_short_links(self, recommendations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not self.shortener:

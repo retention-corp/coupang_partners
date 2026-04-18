@@ -130,6 +130,7 @@ Route based on intent first:
 4. Prefer the hosted backend from `OPENCLAW_SHOPPING_BASE_URL`; default is `https://a.retn.kr`.
 5. Always include `short_deeplink` (prefer over `deeplink`) for each result.
 6. If the user asks for books or taste-sensitive products, use `recommend` and personalize within the shopping flow.
+7. For book requests (책/도서/사서 추천/베스트셀러), add `"vertical": "book"` to the assist payload. The backend runs book_reco (사서추천도서 + Data4Library + Naver) and maps recommendations to Coupang products; titles without a Coupang match are dropped rather than fabricated.
 
 ## Trigger examples
 
@@ -142,6 +143,8 @@ Route based on intent first:
 - `브레빌 870으로 라떼 만들 오트밀크 골라줘`
 - `쿠팡에서 요즘 볼만한 자기계발서 3개만 찾아줘. 내 스타일을 알아보고 추천해라`
 - `내 취향에 맞는 책 3권만 쿠팡에서 골라줘`
+- `사서 추천 도서 중에서 요즘 읽을만한거 뽑아줘`
+- `베스트셀러 소설 쿠팡에서 사려고 하는데 3권만 추천해줘`
 
 ## Backend compatibility
 
