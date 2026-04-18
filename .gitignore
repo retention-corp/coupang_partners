@@ -7,3 +7,5 @@ __pycache__/
 .claude/
 .data/
 *.sqlite3
+.DS_Store
+.harness/
