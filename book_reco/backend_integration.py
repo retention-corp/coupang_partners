@@ -3,8 +3,10 @@
 Exposes a single entrypoint, `book_assist`, that:
 1. Builds book providers/services on demand (fails gracefully to fallback curation).
 2. Resolves the user's free-text query via `RecommendationService`.
-3. Maps each recommended book to a Coupang product via `coupang_bridge`.
-4. Attaches short deeplinks + the affiliate disclosure.
+3. Re-ranks the over-fetched pool through a persona profile (explicit payload hints
+   merged with implicit analytics replay for the same `client_id`).
+4. Maps each recommended book to a Coupang product via `coupang_bridge`.
+5. Attaches short deeplinks, persona-signal explanations, and the affiliate disclosure.
 
 Kept isolated from `backend.py` so the book vertical never pulls pydantic/httpx etc. into
 the hosted backend runtime — the whole module is stdlib.
@@ -16,6 +18,13 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .coupang_bridge import attach_coupang_products
 from .models import BookRecord, ProviderError, RecommendationResponse, TrendingResponse
+from .persona import (
+    PersonaProfile,
+    build_from_analytics,
+    build_from_notion,
+    build_from_payload,
+    merge,
+)
 from .providers.data4library import Data4LibraryProvider
 from .providers.fallback import FallbackProvider
 from .providers.naver import NaverBookProvider
@@ -95,6 +104,23 @@ def _resolve_books(
     return None, trending.books, trending.errors
 
 
+def _build_profile(
+    payload: Dict[str, Any],
+    client_id: Optional[str],
+    analytics_store: Any,
+) -> PersonaProfile:
+    """Combine explicit + implicit + notion signals into a merged PersonaProfile.
+
+    Every source is optional; any failure degrades to the remaining sources silently.
+    explicit > analytics > notion by precedence for scalar fields, union for lists.
+    """
+
+    explicit = build_from_payload(payload)
+    implicit = build_from_analytics(analytics_store, client_id)
+    notion = build_from_notion()
+    return merge(explicit, implicit, notion)
+
+
 def book_assist(
     payload: Dict[str, Any],
     *,
@@ -103,8 +129,17 @@ def book_assist(
     validate_host_fn: Optional[ValidateHostFn] = None,
     disclosure_text: str = DISCLOSURE_TEXT_DEFAULT,
     service_factory: Callable[[], RecommendationService] = _build_service,
+    client_id: Optional[str] = None,
+    analytics_store: Any = None,
 ) -> Dict[str, Any]:
-    """Run the book-vertical flow. `search_products_fn` is the Coupang search adapter."""
+    """Run the book-vertical flow.
+
+    `search_products_fn` is the Coupang search adapter. `client_id` and
+    `analytics_store` are optional: when both are present, the service replays the
+    client's recent queries to derive an implicit persona profile. Explicit persona
+    hints live under `payload["persona"]` and always win over inferred values on
+    scalar fields while unioning on list fields.
+    """
 
     query = str(payload.get("query") or "").strip()
     isbn = str(payload.get("isbn") or payload.get("isbn13") or "").strip()
@@ -114,12 +149,19 @@ def book_assist(
     except (TypeError, ValueError):
         limit = 5
 
+    profile = _build_profile(payload, client_id, analytics_store)
+
     service = service_factory()
     # Over-fetch so the Coupang bridge can absorb books with no matching product without
     # under-filling the response. saseoApi.do returns a frozen ~10-item set; the fallback
     # curated list contributes recent bestsellers so match rate stays healthy.
     over_fetch = max(limit * 3, 10)
     seed, books, errors = _resolve_books(service, query=query, isbn=isbn, limit=over_fetch)
+
+    # Persona-aware re-ranking when we have any signal. Empty profile → no-op.
+    persona_signals: Dict[str, List[Dict[str, Any]]] = {}
+    if not profile.is_empty():
+        books, persona_signals = service.rank_with_profile(books, profile)
 
     # Match books to Coupang products. attach_coupang_products silently drops misses.
     matched = attach_coupang_products(
@@ -129,7 +171,7 @@ def book_assist(
         max_matches=limit,
     )
 
-    # Attach short deeplinks.
+    # Attach short deeplinks + per-recommendation persona explanation.
     for entry in matched:
         product = entry.get("product") or {}
         deeplink = product.get("deeplink", "")
@@ -138,6 +180,10 @@ def book_assist(
             shorten_fn=shorten_fn,
             validate_host_fn=validate_host_fn,
         )
+        book_dict = entry.get("book") or {}
+        key = book_dict.get("isbn13") or book_dict.get("title") or ""
+        if key and key in persona_signals:
+            entry["persona_signals"] = persona_signals[key]
 
     return {
         "ok": True,
@@ -150,7 +196,9 @@ def book_assist(
         "counts": {
             "books": len(books),
             "matched": len(matched),
+            "persona_signals_used": sum(len(v) for v in persona_signals.values()),
         },
+        "persona": profile.to_dict() if not profile.is_empty() else None,
         "errors": _errors_to_dicts(errors),
         "disclosure": disclosure_text,
     }

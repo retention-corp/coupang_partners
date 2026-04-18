@@ -87,12 +87,12 @@ class ShoppingBackend:
             "version": "mvp",
         }
 
-    def assist(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def assist(self, payload: Dict[str, Any], *, client_id: Optional[str] = None) -> Dict[str, Any]:
         payload_error = validate_payload_limits(payload)
         if payload_error:
             raise BackendError(HTTPStatus.BAD_REQUEST, payload_error)
         if (payload.get("vertical") or "").strip().lower() == "book":
-            return self._book_assist(payload)
+            return self._book_assist(payload, client_id=client_id)
         normalized = normalize_request(payload)
         query = normalized["query"]
         if not query:
@@ -131,6 +131,7 @@ class ShoppingBackend:
                 category=normalized["category"],
                 evidence_snippets=evidence_snippets,
                 recommendations=recommendations,
+                client_id=client_id,
             )
         except Exception as exc:
             log_event("analytics_error", stage="record_assist", query=query, error=str(exc))
@@ -282,7 +283,12 @@ class ShoppingBackend:
             return list(deduped.values())
         raise BackendError(HTTPStatus.INTERNAL_SERVER_ERROR, "Adapter must define search() or search_products().")
 
-    def _book_assist(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _book_assist(
+        self,
+        payload: Dict[str, Any],
+        *,
+        client_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         # Imported lazily so the book vertical never pulls its providers into cold paths.
         from book_reco.backend_integration import book_assist
 
@@ -303,6 +309,8 @@ class ShoppingBackend:
             shorten_fn=_shorten if self.shortener else None,
             validate_host_fn=_validate_host,
             disclosure_text=DISCLOSURE_TEXT,
+            client_id=client_id,
+            analytics_store=self.analytics_store,
         )
 
         try:
@@ -312,6 +320,7 @@ class ShoppingBackend:
                 category="book",
                 evidence_snippets=[],
                 recommendations=response.get("recommendations", []),
+                client_id=client_id,
             )
         except Exception as exc:
             log_event("analytics_error", stage="record_book_assist", error=str(exc))
@@ -447,7 +456,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             if self.path in ("/v1/public/assist", "/v1/public/recommendations"):
                 client_marker = self._authorize_public(request_id=request_id, remote_addr=remote_addr)
-                response = self.backend.assist(payload)
+                response = self.backend.assist(payload, client_id=self._client_id_from_headers())
                 log_event("assist_ok", request_id=request_id, path=self.path, remote_addr=remote_addr, client=client_marker)
                 self._send_json(HTTPStatus.OK, {**response, "requestId": request_id})
                 return
@@ -456,7 +465,7 @@ class _Handler(BaseHTTPRequestHandler):
                     self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id})
                     return
                 client_marker = self._authorize_internal(request_id=request_id, remote_addr=remote_addr)
-                response = self.backend.assist(payload)
+                response = self.backend.assist(payload, client_id=self._client_id_from_headers())
                 log_event("assist_ok", request_id=request_id, path=self.path, remote_addr=remote_addr, client=client_marker)
                 self._send_json(HTTPStatus.OK, {**response, "requestId": request_id})
                 return
@@ -490,6 +499,21 @@ class _Handler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
         return
+
+    def _client_id_from_headers(self) -> Optional[str]:
+        """Extract a stable per-caller identifier from request headers.
+
+        The OpenClaw skill ships `X-OpenClaw-Client-Id`; we also honour a more generic
+        `X-Client-Id` fallback so third-party callers can opt into analytics replay
+        without rebranding. Empty values are treated as absent so the analytics store
+        keeps bucketing anonymous traffic separately.
+        """
+
+        for header in ("X-OpenClaw-Client-Id", "X-Client-Id"):
+            value = (self.headers.get(header) or "").strip()
+            if value:
+                return value[:128]
+        return None
 
     def _read_json(self) -> Dict[str, Any]:
         raw_content_length = self.headers.get("Content-Length", "0")
