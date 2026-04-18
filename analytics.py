@@ -64,6 +64,15 @@ class AnalyticsStore:
                 );
                 """
             )
+            # Idempotent migration: `client_id` was added after the initial schema
+            # shipped. Existing rows get NULL; new queries can be tagged per caller.
+            existing = {row[1] for row in connection.execute("PRAGMA table_info(queries)").fetchall()}
+            if "client_id" not in existing:
+                connection.execute("ALTER TABLE queries ADD COLUMN client_id TEXT")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_queries_client_id_created_at "
+                "ON queries (client_id, created_at DESC)"
+            )
 
     def record_assist(
         self,
@@ -73,13 +82,15 @@ class AnalyticsStore:
         category: Optional[str],
         evidence_snippets: Iterable[Dict[str, Any]],
         recommendations: List[Dict[str, Any]],
+        client_id: Optional[str] = None,
     ) -> str:
         query_id = str(uuid.uuid4())
         created_at = _utc_now()
         with sqlite3.connect(self.db_path) as connection:
             connection.execute(
-                "INSERT INTO queries (id, query_text, budget, category, created_at) VALUES (?, ?, ?, ?, ?)",
-                (query_id, query_text, budget, category, created_at),
+                "INSERT INTO queries (id, query_text, budget, category, created_at, client_id) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (query_id, query_text, budget, category, created_at, client_id),
             )
             for snippet in evidence_snippets:
                 connection.execute(
@@ -181,6 +192,38 @@ class AnalyticsStore:
             }
         return summary
 
+    def get_recent_queries_for_client(
+        self,
+        client_id: str,
+        *,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Return the most recent `limit` queries for a client, newest first.
+
+        Used by persona inference to look up what the same caller has been asking about
+        across past requests. Returns an empty list when client_id is missing/empty so
+        callers don't need to special-case cold starts.
+        """
+
+        if not client_id:
+            return []
+        with sqlite3.connect(self.db_path) as connection:
+            rows = connection.execute(
+                "SELECT query_text, category, budget, created_at "
+                "FROM queries WHERE client_id = ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (client_id, int(limit)),
+            ).fetchall()
+        return [
+            {
+                "query_text": row[0],
+                "category": row[1],
+                "budget": row[2],
+                "created_at": row[3],
+            }
+            for row in rows
+        ]
+
 
 class FirestoreAnalyticsStore:
     def __init__(
@@ -222,6 +265,7 @@ class FirestoreAnalyticsStore:
         category: Optional[str],
         evidence_snippets: Iterable[Dict[str, Any]],
         recommendations: List[Dict[str, Any]],
+        client_id: Optional[str] = None,
     ) -> str:
         query_id = str(uuid.uuid4())
         created_at = _utc_now()
@@ -233,6 +277,7 @@ class FirestoreAnalyticsStore:
                 "created_at": {"timestampValue": created_at},
                 **_optional_int_field("budget", budget),
                 **_optional_string_field("category", category),
+                **_optional_string_field("client_id", client_id),
             },
         )
         for snippet in evidence_snippets:
@@ -303,6 +348,49 @@ class FirestoreAnalyticsStore:
             "event_breakdown": event_breakdown,
             "category_breakdown": category_breakdown,
         }
+
+    def get_recent_queries_for_client(
+        self,
+        client_id: str,
+        *,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Return the most recent `limit` queries for a client, newest first."""
+
+        if not client_id:
+            return []
+        response = self._request_json(
+            "POST",
+            f"{self.documents_url}:runQuery",
+            body={
+                "structuredQuery": {
+                    "from": [{"collectionId": self.collections["queries"]}],
+                    "where": {
+                        "fieldFilter": {
+                            "field": {"fieldPath": "client_id"},
+                            "op": "EQUAL",
+                            "value": {"stringValue": client_id},
+                        }
+                    },
+                    "orderBy": [{"field": {"fieldPath": "created_at"}, "direction": "DESCENDING"}],
+                    "limit": int(limit),
+                }
+            },
+        )
+        results: List[Dict[str, Any]] = []
+        for item in _as_sequence(response):
+            document = (item or {}).get("document")
+            if not document:
+                continue
+            results.append(
+                {
+                    "query_text": _firestore_string(document, "query_text") or "",
+                    "category": _firestore_string(document, "category"),
+                    "budget": _firestore_integer(document, "budget"),
+                    "created_at": _firestore_timestamp(document, "created_at") or "",
+                }
+            )
+        return results
 
     def _create_document(self, collection: str, document_id: str, fields: Dict[str, Dict[str, Any]]) -> None:
         self._request_json(
@@ -520,3 +608,14 @@ def _firestore_timestamp(document: Dict[str, Any], field_name: str) -> Optional[
     field = _firestore_fields(document).get(field_name) or {}
     value = field.get("timestampValue")
     return str(value) if value is not None else None
+
+
+def _firestore_integer(document: Dict[str, Any], field_name: str) -> Optional[int]:
+    field = _firestore_fields(document).get(field_name) or {}
+    value = field.get("integerValue")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
