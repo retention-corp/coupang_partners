@@ -183,5 +183,126 @@ class ShoppingBackendVerticalRouteTests(unittest.TestCase):
         self.assertEqual(analytics.calls[0]["category"], "book")
 
 
+class PersonaAwareRoutingTests(unittest.TestCase):
+    def test_avoid_category_drops_unwanted_books_and_ranks_tech_first(self) -> None:
+        curated = _FakeCurated([
+            BookRecord(title="엄마라서 다행이다", author="잭 캔필드", category="육아", source="saseo"),
+            BookRecord(title="데이터 중심 애플리케이션 설계", author="마틴 클레프만",
+                        category="자연과학", description="엔지니어링 교양서",
+                        source="saseo", popularity_score=80.0),
+            BookRecord(title="역행자", author="자청", category="자기계발", source="saseo"),
+        ])
+
+        def fake_search(**kwargs: Any) -> Any:
+            return _coupang_payload([
+                {"productName": kwargs.get("keyword", "") + " 매치", "productUrl": "https://link.coupang.com/a/OK"},
+            ])
+
+        payload = {
+            "vertical": "book",
+            "limit": 3,
+            "persona": {
+                "interests": ["엔지니어링"],
+                "categories": ["자연과학", "자기계발"],
+                "avoid_categories": ["육아"],
+                "engineering_weight": 1.0,
+            },
+        }
+
+        result = book_assist(
+            payload,
+            search_products_fn=fake_search,
+            service_factory=lambda: _fake_service(curated),
+        )
+
+        matched_titles = [rec["book"]["title"] for rec in result["recommendations"]]
+        # 육아 dropped entirely; tech book ranks first.
+        self.assertNotIn("엄마라서 다행이다", matched_titles)
+        self.assertEqual(matched_titles[0], "데이터 중심 애플리케이션 설계")
+        self.assertGreater(result["counts"]["persona_signals_used"], 0)
+        self.assertIsNotNone(result.get("persona"))
+        # Every top rec should carry its signal breakdown.
+        self.assertTrue(all(rec.get("persona_signals") for rec in result["recommendations"]))
+
+    def test_implicit_persona_from_analytics_replay(self) -> None:
+        curated = _FakeCurated([
+            BookRecord(title="엄마라서 다행이다", author="잭 캔필드", category="육아", source="saseo"),
+            BookRecord(title="데이터 중심 애플리케이션 설계", author="마틴 클레프만",
+                        category="자연과학", source="saseo"),
+            BookRecord(title="역행자", author="자청", category="자기계발", source="saseo"),
+        ])
+
+        class _ReplayStore:
+            def get_recent_queries_for_client(self, client_id: str, *, limit: int = 20):
+                if client_id == "cli-engineer":
+                    return [
+                        {"query_text": "엔지니어링 아키텍처 공부"},
+                        {"query_text": "백엔드 개발자 커리어"},
+                    ]
+                return []
+
+        def fake_search(**kwargs: Any) -> Any:
+            return _coupang_payload([
+                {"productName": kwargs.get("keyword", "") + " 매치", "productUrl": "https://link.coupang.com/a/OK"},
+            ])
+
+        result = book_assist(
+            {"vertical": "book", "limit": 3},
+            search_products_fn=fake_search,
+            service_factory=lambda: _fake_service(curated),
+            client_id="cli-engineer",
+            analytics_store=_ReplayStore(),
+        )
+
+        matched_titles = [rec["book"]["title"] for rec in result["recommendations"]]
+        self.assertEqual(matched_titles[0], "데이터 중심 애플리케이션 설계")
+        self.assertIn("analytics:client_id=cli-engineer", " ".join(result["persona"]["source_trace"]))
+
+
+class BookAssistFromAnalyticsRoundTripTests(unittest.TestCase):
+    def test_header_client_id_reaches_analytics(self) -> None:
+        import backend as backend_module
+
+        class FakeAdapter:
+            def search_products(self, **kwargs: Any) -> Any:
+                return _coupang_payload([
+                    {"productName": "엔지니어링 책 매치", "productUrl": "https://link.coupang.com/a/A"},
+                ])
+
+        class FakeAnalytics:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            def record_assist(self, **kwargs: Any) -> str:
+                self.calls.append(kwargs)
+                return "query-id-1"
+
+            def get_recent_queries_for_client(self, client_id: str, *, limit: int = 20):
+                return []
+
+        analytics = FakeAnalytics()
+        backend = backend_module.ShoppingBackend(
+            adapter=FakeAdapter(), analytics_store=analytics, shortener=None,
+        )
+
+        curated = _FakeCurated([
+            BookRecord(title="엔지니어링 책", author="저자A", category="자연과학", source="saseo"),
+        ])
+
+        import book_reco.backend_integration as integration
+        original = integration._build_service
+        integration._build_service = lambda: _fake_service(curated)
+        try:
+            response = backend.assist(
+                {"vertical": "book", "limit": 1},
+                client_id="cli-header-test",
+            )
+        finally:
+            integration._build_service = original
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(analytics.calls[0]["client_id"], "cli-header-test")
+
+
 if __name__ == "__main__":
     unittest.main()
