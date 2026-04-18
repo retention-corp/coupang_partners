@@ -19,10 +19,12 @@ from typing import Any, Callable, Dict, List, Optional
 from .coupang_bridge import attach_coupang_products
 from .models import BookRecord, ProviderError, RecommendationResponse, TrendingResponse
 from .persona import (
+    A_TIER_CLUSTERS,
     PersonaProfile,
     build_from_analytics,
     build_from_notion,
     build_from_payload,
+    cluster_label,
     merge,
 )
 from .providers.data4library import Data4LibraryProvider
@@ -131,6 +133,7 @@ def book_assist(
     service_factory: Callable[[], RecommendationService] = _build_service,
     client_id: Optional[str] = None,
     analytics_store: Any = None,
+    signal_store: Any = None,
 ) -> Dict[str, Any]:
     """Run the book-vertical flow.
 
@@ -138,7 +141,9 @@ def book_assist(
     `analytics_store` are optional: when both are present, the service replays the
     client's recent queries to derive an implicit persona profile. Explicit persona
     hints live under `payload["persona"]` and always win over inferred values on
-    scalar fields while unioning on list fields.
+    scalar fields while unioning on list fields. `signal_store` (book_intel
+    SignalStore) unlocks behavior-learned ranking on top of the persona-aware base
+    score; missing or empty store → pure persona ranking.
     """
 
     query = str(payload.get("query") or "").strip()
@@ -150,6 +155,8 @@ def book_assist(
         limit = 5
 
     profile = _build_profile(payload, client_id, analytics_store)
+    cluster = cluster_label(profile)
+    tier = "A" if cluster in A_TIER_CLUSTERS else "B"
 
     service = service_factory()
     # Over-fetch so the Coupang bridge can absorb books with no matching product without
@@ -161,7 +168,7 @@ def book_assist(
     # Persona-aware re-ranking when we have any signal. Empty profile → no-op.
     persona_signals: Dict[str, List[Dict[str, Any]]] = {}
     if not profile.is_empty():
-        books, persona_signals = service.rank_with_profile(books, profile)
+        books, persona_signals = service.rank_with_profile(books, profile, signal_store=signal_store)
 
     # Match books to Coupang products. attach_coupang_products silently drops misses.
     matched = attach_coupang_products(
@@ -171,8 +178,8 @@ def book_assist(
         max_matches=limit,
     )
 
-    # Attach short deeplinks + per-recommendation persona explanation.
-    for entry in matched:
+    # Attach short deeplinks + per-recommendation persona explanation + emit impressions.
+    for position, entry in enumerate(matched):
         product = entry.get("product") or {}
         deeplink = product.get("deeplink", "")
         product["short_deeplink"] = _apply_short_link(
@@ -184,6 +191,16 @@ def book_assist(
         key = book_dict.get("isbn13") or book_dict.get("title") or ""
         if key and key in persona_signals:
             entry["persona_signals"] = persona_signals[key]
+
+        _emit_impression(
+            analytics_store,
+            book_dict=book_dict,
+            product=product,
+            position=position,
+            cluster=cluster,
+            tier=tier,
+            client_id=client_id,
+        )
 
     return {
         "ok": True,
@@ -199,9 +216,60 @@ def book_assist(
             "persona_signals_used": sum(len(v) for v in persona_signals.values()),
         },
         "persona": profile.to_dict() if not profile.is_empty() else None,
+        "persona_cluster": cluster,
+        "tier": tier,
         "errors": _errors_to_dicts(errors),
         "disclosure": disclosure_text,
     }
+
+
+def _emit_impression(
+    analytics_store: Any,
+    *,
+    book_dict: Dict[str, Any],
+    product: Dict[str, Any],
+    position: int,
+    cluster: str,
+    tier: str,
+    client_id: Optional[str],
+) -> None:
+    """Best-effort book_impression emission (no book_intel dependency to keep book_reco pure)."""
+
+    if analytics_store is None or not hasattr(analytics_store, "record_event"):
+        return
+    isbn = (book_dict.get("isbn13") or "").strip()
+    if not isbn:
+        return
+    slug = _extract_short_link_slug(product.get("short_deeplink", ""))
+    try:
+        analytics_store.record_event(
+            event_type="book_impression",
+            metadata={
+                "isbn13": isbn,
+                "title": book_dict.get("title", ""),
+                "position": position,
+                "persona_cluster": cluster,
+                "tier": tier,
+                "slug": slug,
+                "client_id": client_id,
+            },
+        )
+    except Exception as exc:
+        LOGGER.debug("impression emit failed: %s", exc)
+
+
+def _extract_short_link_slug(short_deeplink: str) -> str:
+    """Pull the slug out of a https://host/s/{slug} short URL. Returns "" on mismatch."""
+
+    if not short_deeplink:
+        return ""
+    marker = "/s/"
+    idx = short_deeplink.find(marker)
+    if idx < 0:
+        return ""
+    tail = short_deeplink[idx + len(marker):]
+    tail = tail.split("?", 1)[0].split("#", 1)[0].strip("/")
+    return tail
 
 
 __all__ = ["book_assist", "DISCLOSURE_TEXT_DEFAULT"]

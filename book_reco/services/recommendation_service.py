@@ -5,14 +5,14 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from ..models import BookRecord, ProviderError, RecommendationResponse, TrendingResponse
-from ..persona import PersonaProfile
+from ..persona import PersonaProfile, cluster_label
 from ..providers.base import (
     BookMetadataProvider,
     BookRecommendationProvider,
     BookSearchProvider,
     TrendingBooksProvider,
 )
-from ..utils import LOGGER, score_candidate_with_persona
+from ..utils import LOGGER, SignalStoreProtocol, learned_boost, score_candidate_with_persona
 
 
 @runtime_checkable
@@ -132,8 +132,16 @@ class RecommendationService:
         self,
         books: list[BookRecord],
         profile: PersonaProfile | None,
+        *,
+        signal_store: SignalStoreProtocol | None = None,
     ) -> tuple[list[BookRecord], dict[str, list[dict[str, object]]]]:
         """Re-sort candidates using a persona profile. Returns (ordered_books, signal_index).
+
+        Base score comes from `score_candidate_with_persona` (category/author/interest/
+        avoid/korean/engineering). When a `signal_store` is supplied we add a
+        behavior-learned boost on top via `learned_boost` — Wilson-safe CTR/CVR
+        lower bounds for the book's (isbn, cluster) over the last 28 days. Cold
+        start (empty store) contributes 0.
 
         `signal_index` maps `BookRecord.isbn13 or title` → list of signal dicts so the
         backend integration layer can attach per-recommendation explanations.
@@ -145,11 +153,16 @@ class RecommendationService:
         if not profile or profile.is_empty() or not books:
             return books, {}
 
+        cluster = cluster_label(profile)
         scored: list[tuple[float, BookRecord, list[dict[str, object]]]] = []
         for book in books:
             score, signals = score_candidate_with_persona(book, profile)
             if score < 0:
                 continue
+            boost, boost_signals = learned_boost(book, cluster, signal_store)
+            score += boost
+            if boost_signals:
+                signals = list(signals) + boost_signals
             scored.append((score, book, signals))
 
         scored.sort(key=lambda entry: (-entry[0], entry[1].title))

@@ -5,10 +5,11 @@ from __future__ import annotations
 import html
 import json
 import logging
+import math
 import re
 import urllib.parse
 import urllib.request
-from typing import Any
+from typing import Any, Protocol
 
 from .config import get_settings
 from .models import BookRecord
@@ -172,6 +173,70 @@ def score_candidate_with_persona(
             signals.append({"signal": "engineering_weight", "weight": weight})
 
     return score, signals
+
+
+def _wilson_lower_bound(positive: int, total: int, z: float = 1.96) -> float:
+    """95% CI lower bound for a binomial proportion (Wilson score interval).
+
+    Prevents small-N rate estimates from dominating the learned ranking: a book with
+    1 click / 10 impressions (raw CTR 10%) gets a Wilson LB of ~1.8%, not 10%. A book
+    with 100 / 1000 gets ~8.3% — the big-N estimate stays close to the raw rate.
+    """
+
+    if total <= 0 or positive < 0 or positive > total:
+        return 0.0
+    p = positive / total
+    denom = 1.0 + (z * z) / total
+    centre = p + (z * z) / (2.0 * total)
+    margin = z * math.sqrt((p * (1.0 - p) + (z * z) / (4.0 * total)) / total)
+    return max(0.0, (centre - margin) / denom)
+
+
+class SignalStoreProtocol(Protocol):
+    """Minimum surface the learned-ranking scorer needs from a signal store."""
+
+    def recent_rates(
+        self, isbn: str, cluster: str, window_days: int = 28
+    ) -> tuple[float, float]: ...
+
+
+def learned_boost(
+    candidate: BookRecord,
+    cluster: str | None,
+    signal_store: SignalStoreProtocol | None,
+    *,
+    window_days: int = 28,
+) -> tuple[float, list[dict[str, Any]]]:
+    """Add a behavior-learned boost on top of the persona-aware base score.
+
+    Only fires when we have *both* a meaningful cluster and a signal store that
+    returns a Wilson-safe CTR/CVR lower bound above gentle thresholds (4% / 2%).
+    Cold-start is a hard 0.0 boost + empty signal list, so missing infrastructure
+    never reorders results.
+    """
+
+    if signal_store is None or not cluster or cluster == "other":
+        return 0.0, []
+    isbn = (candidate.isbn13 or "").strip()
+    if not isbn:
+        return 0.0, []
+    try:
+        ctr_lb, cvr_lb = signal_store.recent_rates(isbn, cluster, window_days=window_days)
+    except Exception as exc:
+        LOGGER.debug("learned_boost signal lookup failed: %s", exc)
+        return 0.0, []
+
+    boost = 0.0
+    signals: list[dict[str, Any]] = []
+    if ctr_lb > 0.04:
+        weight = min(1.5 * ctr_lb * 10.0, 2.0)
+        boost += weight
+        signals.append({"signal": f"learned_ctr:{cluster}:{ctr_lb:.3f}", "weight": round(weight, 3)})
+    if cvr_lb > 0.02:
+        weight = min(3.0 * cvr_lb * 10.0, 3.0)
+        boost += weight
+        signals.append({"signal": f"learned_cvr:{cluster}:{cvr_lb:.3f}", "weight": round(weight, 3)})
+    return min(boost, 3.0), signals
 
 
 def http_get_text(

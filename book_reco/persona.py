@@ -282,6 +282,42 @@ def _extend_unique(sink: list[str], source: Iterable[str]) -> None:
             sink.append(item)
 
 
+_CLUSTER_CUES: dict[str, tuple[str, ...]] = {
+    "openclaw_engineer": (
+        "엔지니어링", "엔지니어", "백엔드", "프론트엔드", "인프라",
+        "아키텍처", "개발자", "개발", "알고리즘", "보안", "데이터",
+    ),
+    "openclaw_operator": (
+        "솔로 오퍼레이터", "오퍼레이터", "수익화", "스타트업", "창업",
+        "프로덕트", " pm ", "인디해커",
+    ),
+    "general_self_dev": ("자기계발", "경영", "재무", "마케팅", "돈"),
+    "literature": ("소설", "문학", "에세이", "시"),
+    "parent_lifestyle": ("육아", "교육", "건강", "요리", "운동", "다이어트"),
+}
+
+# OpenClaw-friendly clusters get A-tier content polish; others fall to B-tier.
+A_TIER_CLUSTERS = frozenset({"openclaw_engineer", "openclaw_operator"})
+
+
+def cluster_label(profile: PersonaProfile | None) -> str:
+    """Bucket a profile into one of six fixed clusters for feedback-loop aggregation.
+
+    Hand-coded decision tree so cold-start is deterministic; v2 replaces with behavior
+    embeddings once events ≥10k. Empty / unknown → `other`, which means learned_boost
+    skips the profile entirely and ranking falls back to the persona-aware scorer only.
+    """
+
+    if profile is None or profile.is_empty():
+        return "other"
+    corpus = " ".join(profile.interests + profile.categories + profile.authors).lower()
+    if not corpus.strip():
+        return "other"
+    scores = {cluster: sum(1 for cue in cues if cue.strip().lower() in corpus) for cluster, cues in _CLUSTER_CUES.items()}
+    best_cluster = max(scores, key=lambda c: (scores[c], c))
+    return best_cluster if scores[best_cluster] > 0 else "other"
+
+
 __all__ = [
     "PersonaProfile",
     "build_from_payload",
@@ -289,4 +325,6 @@ __all__ = [
     "build_from_notion",
     "merge",
     "interest_tokens",
+    "cluster_label",
+    "A_TIER_CLUSTERS",
 ]

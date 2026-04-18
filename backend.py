@@ -55,10 +55,12 @@ class ShoppingBackend:
         analytics_store: AnalyticsStore,
         shortener: Optional[UrlShortener] = None,
         allowed_deeplink_hosts: Optional[List[str]] = None,
+        signal_store: Any = None,
     ) -> None:
         self.adapter = adapter
         self.analytics_store = analytics_store
         self.shortener = shortener
+        self.signal_store = signal_store
         self.allowed_deeplink_hosts = allowed_deeplink_hosts or [
             "coupang.com",
             "link.coupang.com",
@@ -311,6 +313,7 @@ class ShoppingBackend:
             disclosure_text=DISCLOSURE_TEXT,
             client_id=client_id,
             analytics_store=self.analytics_store,
+            signal_store=self.signal_store,
         )
 
         try:
@@ -400,6 +403,24 @@ class _Handler(BaseHTTPRequestHandler):
                     self._send_json(HTTPStatus.NOT_FOUND, {"error": "Short link not found", "requestId": request_id})
                     return
                 self.backend.record_short_link_click(slug)
+                # Emit book_click for the feedback loop — slug is joined against recent
+                # book_impression events in book_intel.feedback.rollup to recover isbn+cluster.
+                source_tag = (
+                    self.headers.get("X-OpenClaw-Source")
+                    or _infer_click_source(self.headers.get("Referer", ""))
+                )
+                try:
+                    self.backend.analytics_store.record_event(
+                        event_type="book_click",
+                        metadata={
+                            "slug": slug,
+                            "source": source_tag,
+                            "client_id": self._client_id_from_headers(),
+                            "referer": (self.headers.get("Referer") or "")[:200],
+                        },
+                    )
+                except Exception as exc:
+                    log_event("feedback_error", stage="book_click", slug=slug, error=str(exc))
                 self.send_response(HTTPStatus.FOUND)
                 self.send_header("X-Request-Id", request_id)
                 self.send_header("Location", target)
@@ -584,6 +605,21 @@ class _Handler(BaseHTTPRequestHandler):
         return self.public_rate_limiter or self.rate_limiter
 
 
+def _infer_click_source(referer: str) -> str:
+    """Classify the click referrer into one of {blog, email, skill, api} for analytics."""
+
+    referer = (referer or "").lower()
+    if not referer:
+        return "api"
+    if "mail" in referer or "newsletter" in referer:
+        return "email"
+    if "retn.kr" in referer or "ghost" in referer or "blog" in referer:
+        return "blog"
+    if "openclaw" in referer or "skill" in referer:
+        return "skill"
+    return "api"
+
+
 def _normalize_search_product(product: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "title": product.get("productName") or product.get("title") or "",
@@ -689,7 +725,27 @@ def build_backend_from_env() -> ShoppingBackend:
         analytics_store=build_analytics_store_from_env(db_path=db_path),
         shortener=_build_shortener_from_env(db_path=db_path, public_base_url=public_base_url),
         allowed_deeplink_hosts=_load_allowed_deeplink_hosts(),
+        signal_store=_build_signal_store_from_env(db_path=db_path),
     )
+
+
+def _build_signal_store_from_env(*, db_path: str) -> Any:
+    """Build the book_intel SignalStore if book_intel is installed. Returns None if absent.
+
+    Kept here (not imported at module top) so a deployment without the book_intel
+    package — e.g., a minimal shopping-only backend — still boots clean and the book
+    vertical just degrades to persona-only ranking.
+    """
+
+    try:
+        from book_intel.feedback.signal_store import SignalStore
+    except Exception:
+        return None
+    signal_db = os.getenv("OPENCLAW_BOOK_SIGNAL_DB_PATH") or db_path
+    try:
+        return SignalStore(signal_db)
+    except Exception:
+        return None
 
 
 def run_server(host: Optional[str] = None, port: Optional[int] = None) -> None:
