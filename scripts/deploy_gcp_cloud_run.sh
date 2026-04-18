@@ -15,7 +15,7 @@ gcloud run deploy "${SERVICE_NAME}" \
   --region "${REGION}" \
   --source . \
   --allow-unauthenticated \
-  --set-secrets "COUPANG_ACCESS_KEY=coupang-access-key:latest,COUPANG_SECRET_KEY=coupang-secret-key:latest,OPENCLAW_SHOPPING_API_TOKENS=openclaw-shopping-api-token:latest" \
+  --set-secrets "COUPANG_ACCESS_KEY=coupang-access-key:latest,COUPANG_SECRET_KEY=coupang-secret-key:latest,OPENCLAW_SHOPPING_API_TOKENS=openclaw-shopping-api-token:latest,NLK_API_KEY=nl-go-kr-cert-key:latest,SASEO_API_KEY=nl-go-kr-cert-key:latest" \
   --set-env-vars "GOOGLE_CLOUD_PROJECT=${PROJECT_ID},OPENCLAW_SHOPPING_SHORTENER=firestore,OPENCLAW_SHORT_LINKS_COLLECTION=short_links,OPENCLAW_SHOPPING_ANALYTICS_PROVIDER=firestore,OPENCLAW_ANALYTICS_COLLECTION_PREFIX=shopping,OPENCLAW_SHOPPING_PUBLIC_BASE_URL=${PUBLIC_BASE_URL},OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES=false" \
   --memory 512Mi \
   --cpu 1 \
