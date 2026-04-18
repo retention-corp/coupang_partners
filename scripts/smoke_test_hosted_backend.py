@@ -41,7 +41,10 @@ def _request_json(
     token: Optional[str] = None,
     payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "X-OpenClaw-Client-Id": os.getenv("OPENCLAW_SHOPPING_CLIENT_ID", "smoke-test"),
+    }
     if token:
         headers["Authorization"] = f"Bearer {token}"
     body = None if payload is None else json.dumps(payload).encode("utf-8")

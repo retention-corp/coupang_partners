@@ -441,5 +441,71 @@ class BackendTests(unittest.TestCase):
         ctx.exception.close()
 
 
+class ResponseCacheTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self._saved_ttl = os.environ.get("OPENCLAW_SHOPPING_RESPONSE_CACHE_TTL_SECONDS")
+
+    def tearDown(self):
+        self.tempdir.cleanup()
+        if self._saved_ttl is None:
+            os.environ.pop("OPENCLAW_SHOPPING_RESPONSE_CACHE_TTL_SECONDS", None)
+        else:
+            os.environ["OPENCLAW_SHOPPING_RESPONSE_CACHE_TTL_SECONDS"] = self._saved_ttl
+
+    def _build_backend(self, adapter):
+        return ShoppingBackend(
+            adapter=adapter,
+            analytics_store=AnalyticsStore(f"{self.tempdir.name}/a.sqlite3"),
+        )
+
+    def test_goldbox_response_cached_within_ttl(self):
+        os.environ["OPENCLAW_SHOPPING_RESPONSE_CACHE_TTL_SECONDS"] = "900"
+
+        class Counter:
+            calls = 0
+
+            def get_goldbox(self_inner):
+                Counter.calls += 1
+                return {"data": [{"productId": 10, "productName": "딜", "productPrice": 1000, "productUrl": "https://www.coupang.com/vp/products/10"}]}
+
+        backend = self._build_backend(Counter())
+        first = backend.goldbox()
+        second = backend.goldbox()
+        self.assertEqual(Counter.calls, 1)
+        self.assertEqual(first["data"]["deals"], second["data"]["deals"])
+
+    def test_best_response_cached_per_category(self):
+        os.environ["OPENCLAW_SHOPPING_RESPONSE_CACHE_TTL_SECONDS"] = "900"
+
+        class Counter:
+            calls: dict = {}
+
+            def get_bestcategories(self_inner, category_id):
+                Counter.calls[category_id] = Counter.calls.get(category_id, 0) + 1
+                return {"data": [{"productId": int(category_id), "productName": f"cat-{category_id}", "productPrice": 2000, "productUrl": f"https://www.coupang.com/vp/products/{category_id}"}]}
+
+        backend = self._build_backend(Counter())
+        backend.best("1001")
+        backend.best("1001")
+        backend.best("1002")
+        self.assertEqual(Counter.calls, {"1001": 1, "1002": 1})
+
+    def test_cache_disabled_when_ttl_zero(self):
+        os.environ["OPENCLAW_SHOPPING_RESPONSE_CACHE_TTL_SECONDS"] = "0"
+
+        class Counter:
+            calls = 0
+
+            def get_goldbox(self_inner):
+                Counter.calls += 1
+                return {"data": []}
+
+        backend = self._build_backend(Counter())
+        backend.goldbox()
+        backend.goldbox()
+        self.assertEqual(Counter.calls, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

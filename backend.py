@@ -1,10 +1,11 @@
 import json
 import os
 import threading
+import time
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from analytics import AnalyticsStore, build_analytics_store_from_env
 from client import CoupangPartnersClient
@@ -62,6 +63,22 @@ class ShoppingBackend:
             "coupang.com",
             "link.coupang.com",
         ]
+        self._cache_ttl = _response_cache_ttl_from_env()
+        self._cache_lock = threading.Lock()
+        self._cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+
+    def _cache_get_or_compute(self, key: str, compute: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
+        if self._cache_ttl <= 0:
+            return compute()
+        now = time.monotonic()
+        with self._cache_lock:
+            entry = self._cache.get(key)
+            if entry and entry[0] > now:
+                return entry[1]
+        value = compute()
+        with self._cache_lock:
+            self._cache[key] = (time.monotonic() + self._cache_ttl, value)
+        return value
 
     def health(self) -> Dict[str, Any]:
         return {
@@ -139,18 +156,22 @@ class ShoppingBackend:
     def goldbox(self) -> Dict[str, Any]:
         if not hasattr(self.adapter, "get_goldbox"):
             raise BackendError(HTTPStatus.NOT_IMPLEMENTED, "Adapter does not support get_goldbox().")
-        raw = self.adapter.get_goldbox()
-        products = _extract_products(raw)
-        normalized = [_normalize_search_product(p) for p in products]
-        enriched = self._attach_short_links(normalized)
-        return {
-            "ok": True,
-            "data": {
-                "deals": enriched,
-                "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            },
-            "disclosure": DISCLOSURE_TEXT,
-        }
+
+        def _compute() -> Dict[str, Any]:
+            raw = self.adapter.get_goldbox()
+            products = _extract_products(raw)
+            normalized = [_normalize_search_product(p) for p in products]
+            enriched = self._attach_short_links(normalized)
+            return {
+                "ok": True,
+                "data": {
+                    "deals": enriched,
+                    "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                },
+                "disclosure": DISCLOSURE_TEXT,
+            }
+
+        return self._cache_get_or_compute("goldbox", _compute)
 
     def search(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         keyword = (payload.get("keyword") or "").strip()
@@ -188,15 +209,19 @@ class ShoppingBackend:
     def best(self, category_id: str) -> Dict[str, Any]:
         if not hasattr(self.adapter, "get_bestcategories"):
             raise BackendError(HTTPStatus.NOT_IMPLEMENTED, "Adapter does not support get_bestcategories().")
-        raw = self.adapter.get_bestcategories(category_id)
-        products = _extract_products(raw)
-        normalized = [_normalize_search_product(p) for p in products]
-        enriched = self._attach_short_links(normalized)
-        return {
-            "ok": True,
-            "data": {"category_id": category_id, "products": enriched},
-            "disclosure": DISCLOSURE_TEXT,
-        }
+
+        def _compute() -> Dict[str, Any]:
+            raw = self.adapter.get_bestcategories(category_id)
+            products = _extract_products(raw)
+            normalized = [_normalize_search_product(p) for p in products]
+            enriched = self._attach_short_links(normalized)
+            return {
+                "ok": True,
+                "data": {"category_id": category_id, "products": enriched},
+                "disclosure": DISCLOSURE_TEXT,
+            }
+
+        return self._cache_get_or_compute(f"best:{category_id}", _compute)
 
     def record_event(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         event_type = (payload.get("event_type") or "").strip()
@@ -694,6 +719,15 @@ def _page_evidence_timeout_seconds_from_env() -> int:
     except ValueError:
         return 2
     return max(1, min(value, 5))
+
+
+def _response_cache_ttl_from_env() -> int:
+    raw = os.getenv("OPENCLAW_SHOPPING_RESPONSE_CACHE_TTL_SECONDS", "900")
+    try:
+        value = int(raw)
+    except ValueError:
+        return 900
+    return max(0, value)
 
 
 def _operator_routes_enabled() -> bool:
