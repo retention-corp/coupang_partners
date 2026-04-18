@@ -5,13 +5,14 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from ..models import BookRecord, ProviderError, RecommendationResponse, TrendingResponse
+from ..persona import PersonaProfile
 from ..providers.base import (
     BookMetadataProvider,
     BookRecommendationProvider,
     BookSearchProvider,
     TrendingBooksProvider,
 )
-from ..utils import LOGGER
+from ..utils import LOGGER, score_candidate_with_persona
 
 
 @runtime_checkable
@@ -126,6 +127,40 @@ class RecommendationService:
                 if book.isbn13:
                     seen_isbn.add(book.isbn13)
         return TrendingResponse(books=merged, errors=errors)
+
+    def rank_with_profile(
+        self,
+        books: list[BookRecord],
+        profile: PersonaProfile | None,
+    ) -> tuple[list[BookRecord], dict[str, list[dict[str, object]]]]:
+        """Re-sort candidates using a persona profile. Returns (ordered_books, signal_index).
+
+        `signal_index` maps `BookRecord.isbn13 or title` → list of signal dicts so the
+        backend integration layer can attach per-recommendation explanations.
+
+        A negative score (e.g. an `avoid_categories` hit) drops the candidate entirely
+        rather than just ranking it low — this is the user's explicit veto.
+        """
+
+        if not profile or profile.is_empty() or not books:
+            return books, {}
+
+        scored: list[tuple[float, BookRecord, list[dict[str, object]]]] = []
+        for book in books:
+            score, signals = score_candidate_with_persona(book, profile)
+            if score < 0:
+                continue
+            scored.append((score, book, signals))
+
+        scored.sort(key=lambda entry: (-entry[0], entry[1].title))
+        signal_index: dict[str, list[dict[str, object]]] = {}
+        ordered: list[BookRecord] = []
+        for _, book, signals in scored:
+            ordered.append(book)
+            key = book.isbn13 or book.title
+            if signals:
+                signal_index[key] = signals
+        return ordered, signal_index
 
     def _recommend_from_seed(self, seed: BookRecord, limit: int, errors: list[ProviderError]) -> RecommendationResponse:
         # Curator first (librarian picks near the seed's category/author), then ISBN-driven
