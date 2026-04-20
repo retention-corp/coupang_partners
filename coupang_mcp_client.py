@@ -4,11 +4,107 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional
+from urllib import error, parse, request
 
 from client import CoupangPartnersClient
+
+_DEFAULT_HOSTED_BACKEND = "https://a.retn.kr"
+_PUBLIC_ASSIST_PATH = "/v1/public/assist"
+_HOSTED_CLIENT_ID_DEFAULT = "openclaw-skill"
+
+
+def _hosted_client_id() -> str:
+    return os.getenv("OPENCLAW_SHOPPING_CLIENT_ID") or _HOSTED_CLIENT_ID_DEFAULT
+
+
+def _hosted_base_url() -> str:
+    return (
+        os.getenv("OPENCLAW_SHOPPING_BASE_URL")
+        or os.getenv("OPENCLAW_SHOPPING_BACKEND_URL")
+        or _DEFAULT_HOSTED_BACKEND
+    ).rstrip("/")
+
+
+class _HostedAssistClient:
+    """Thin stdlib urllib client against POST /v1/public/assist."""
+
+    def __init__(self, *, base_url: str = "", timeout_seconds: int = 20) -> None:
+        self._base_url = base_url or _hosted_base_url()
+        self._timeout = timeout_seconds
+
+    def search_products(self, *, keyword: str) -> list[dict[str, Any]]:
+        url = self._base_url + _PUBLIC_ASSIST_PATH
+        body = json.dumps({"query": keyword}).encode()
+        req = request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-OpenClaw-Client-Id": _hosted_client_id(),
+            },
+        )
+        try:
+            with request.urlopen(req, timeout=self._timeout) as resp:
+                raw = resp.read()
+        except error.HTTPError as exc:
+            raise McpError(
+                f"Hosted backend HTTP {exc.code} for {url}: {exc.reason}"
+            ) from exc
+        except error.URLError as exc:
+            raise McpError(f"Hosted backend unreachable ({url}): {exc.reason}") from exc
+
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise McpError("Hosted backend returned non-JSON response") from exc
+
+        error_body = payload.get("error")
+        if error_body:
+            raise McpError(f"Hosted backend error: {error_body}")
+
+        items: list[dict[str, Any]] = []
+        best_fit = payload.get("best_fit")
+        if isinstance(best_fit, dict):
+            items.append(best_fit)
+        shortlist = payload.get("shortlist") or payload.get("recommendations") or []
+        for entry in shortlist:
+            if entry is best_fit:
+                continue
+            items.append(entry)
+        return [_map_hosted_item(item) for item in items]
+
+    def get_goldbox(self) -> Any:
+        raise McpError(
+            "get_coupang_goldbox requires COUPANG_ACCESS_KEY / COUPANG_SECRET_KEY. "
+            "Hosted fallback only supports search-style tools."
+        )
+
+    def get_bestcategories(self, category_id: Any) -> Any:
+        raise McpError(
+            "get_coupang_bestcategories requires COUPANG_ACCESS_KEY / COUPANG_SECRET_KEY. "
+            "Hosted fallback only supports search-style tools."
+        )
+
+
+def _map_hosted_item(item: dict[str, Any]) -> dict[str, Any]:
+    meta = item.get("metadata") or {}
+    return {
+        "productId": item.get("product_id"),
+        "productName": item.get("title"),
+        "productPrice": item.get("price"),
+        "productUrl": item.get("short_deeplink") or item.get("deeplink"),
+        "productImage": meta.get("productImage"),
+        "isRocket": bool(meta.get("isRocket")),
+        "rating": item.get("rating"),
+        "reviewCount": item.get("review_count"),
+        "vendor": item.get("vendor"),
+        "metadata": meta,
+    }
 
 DEFAULT_MCP_ENDPOINT = "local://coupang-mcp"
 DEFAULT_PROTOCOL_VERSION = "2025-03-26"
@@ -113,7 +209,18 @@ class CoupangMcpClient:
 
     def _get_partners_client(self) -> Any:
         if self._partners_client is None:
-            self._partners_client = CoupangPartnersClient.from_env(timeout=self.timeout_seconds)
+            force_hosted = (os.getenv("OPENCLAW_SHOPPING_FORCE_HOSTED") or "").strip() == "1"
+            if not force_hosted:
+                try:
+                    self._partners_client = CoupangPartnersClient.from_env(
+                        timeout=self.timeout_seconds
+                    )
+                except Exception:
+                    force_hosted = True
+            if force_hosted:
+                self._partners_client = _HostedAssistClient(
+                    timeout_seconds=self.timeout_seconds
+                )
         return self._partners_client
 
 
