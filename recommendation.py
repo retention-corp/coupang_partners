@@ -60,24 +60,63 @@ def normalize_product(raw_product: Dict[str, Any]) -> Dict[str, Any]:
     price = _coerce_int(raw_product.get("price") or raw_product.get("salePrice") or raw_product.get("productPrice"))
     deeplink = raw_product.get("deeplink") or raw_product.get("productUrl") or raw_product.get("url")
     length_m = _extract_length_meters(title)
+    rating = (
+        raw_product.get("rating")
+        or raw_product.get("ratingAverage")
+        or raw_product.get("page_rating")
+        or 0
+    )
+    review_count = (
+        raw_product.get("review_count")
+        or raw_product.get("reviewCount")
+        or raw_product.get("page_review_count")
+        or 0
+    )
+    description = raw_product.get("description") or ""
+    page_description = raw_product.get("page_description") or ""
+    page_snippets = list(raw_product.get("page_snippets") or [])
+    summary = _build_product_summary(description, page_description, page_snippets)
     return {
         "product_id": str(raw_product.get("product_id") or raw_product.get("productId") or raw_product.get("id") or title),
         "title": title,
         "price": price,
         "currency": raw_product.get("currency", "KRW"),
         "vendor": raw_product.get("vendor") or raw_product.get("brand"),
-        "rating": raw_product.get("rating") or raw_product.get("ratingAverage") or 0,
-        "review_count": raw_product.get("review_count") or raw_product.get("reviewCount") or 0,
+        "rating": rating,
+        "review_count": review_count,
         "length_m": length_m,
         "deeplink": deeplink,
-        "description": raw_product.get("description") or "",
+        "description": description,
+        "summary": summary,
         "page_title": raw_product.get("page_title") or "",
-        "page_description": raw_product.get("page_description") or "",
-        "page_snippets": list(raw_product.get("page_snippets") or []),
+        "page_description": page_description,
+        "page_snippets": page_snippets,
         "page_facts": list(raw_product.get("page_facts") or []),
         "page_url": raw_product.get("page_url") or "",
         "metadata": raw_product,
     }
+
+
+def _build_product_summary(
+    description: str,
+    page_description: str,
+    page_snippets: List[str],
+) -> str:
+    """Synthesize a short top-level summary so recommendations expose at least one
+    reader-ready sentence without walking into `metadata`. Preference order:
+    Coupang metadata description → landing-page description → first landing-page snippet.
+    Capped at 280 chars to keep JSON responses small for the MCP callers.
+    """
+
+    for candidate in (description, page_description):
+        text = (candidate or "").strip()
+        if text:
+            return text[:280]
+    for snippet in page_snippets:
+        text = (str(snippet) or "").strip()
+        if text:
+            return text[:280]
+    return ""
 
 
 def normalize_request(payload: Dict[str, Any]) -> Dict[str, Any]:

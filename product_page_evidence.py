@@ -35,6 +35,8 @@ class _PageEvidenceParser(HTMLParser):
         self.structured_name = ""
         self.structured_description = ""
         self.structured_brand = ""
+        self.structured_rating: Optional[float] = None
+        self.structured_review_count: Optional[int] = None
 
     def handle_starttag(self, tag: str, attrs: List[tuple[str, Optional[str]]]) -> None:
         attrs_dict = dict(attrs)
@@ -125,6 +127,12 @@ class _PageEvidenceParser(HTMLParser):
                     self.structured_brand = _clean_text(brand.get("name") or "")
                 elif isinstance(brand, str):
                     self.structured_brand = _clean_text(brand)
+            if self.structured_rating is None or self.structured_review_count is None:
+                rating, review_count = _extract_aggregate_rating(candidate)
+                if self.structured_rating is None and rating is not None:
+                    self.structured_rating = rating
+                if self.structured_review_count is None and review_count is not None:
+                    self.structured_review_count = review_count
 
 
 def _flatten_json_ld(payload: Any) -> Iterable[Dict[str, Any]]:
@@ -138,6 +146,40 @@ def _flatten_json_ld(payload: Any) -> Iterable[Dict[str, Any]]:
         for item in payload:
             if isinstance(item, dict):
                 yield item
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_nonneg_int(value: Any) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+def _extract_aggregate_rating(candidate: Dict[str, Any]) -> tuple[Optional[float], Optional[int]]:
+    aggregate = candidate.get("aggregateRating")
+    if not isinstance(aggregate, dict):
+        return None, None
+    rating = _coerce_float(aggregate.get("ratingValue"))
+    review_count = _coerce_nonneg_int(
+        aggregate.get("reviewCount")
+        if aggregate.get("reviewCount") not in (None, "")
+        else aggregate.get("ratingCount")
+    )
+    if rating is not None and not (0.0 <= rating <= 5.0):
+        rating = None
+    return rating, review_count
 
 
 def _clean_text(text: str) -> str:
@@ -165,7 +207,11 @@ def build_product_page_url(product: Dict[str, Any]) -> Optional[str]:
         return None
     parsed = parse.urlparse(raw_url)
     host = (parsed.hostname or "").lower()
-    if host in {"www.coupang.com", "m.coupang.com", "coupang.com"}:
+    # link.coupang.com is the affiliate-redirect host. Allow it here so the fetch step
+    # can follow the 302 to the canonical www.coupang.com product page — the post-fetch
+    # `parsed_final` check still enforces coupang.com as the final host, so a hijacked
+    # redirect to a third-party domain would be rejected after the fetch.
+    if host in {"www.coupang.com", "m.coupang.com", "coupang.com", "link.coupang.com"}:
         return raw_url
     return None
 
@@ -218,8 +264,12 @@ def fetch_product_page_evidence(
         facts.append("Landing page description captured")
     if snippets:
         facts.append(f"Landing page snippet count: {len(snippets)}")
+    if parser.structured_rating is not None:
+        facts.append(f"Landing page rating: {parser.structured_rating:.1f}")
+    if parser.structured_review_count is not None:
+        facts.append(f"Landing page review count: {parser.structured_review_count}")
 
-    if not any([title, description, snippets, facts]):
+    if not any([title, description, snippets, facts, parser.structured_rating, parser.structured_review_count]):
         return None
     return {
         "page_url": final_url,
@@ -227,6 +277,8 @@ def fetch_product_page_evidence(
         "page_description": description,
         "page_snippets": snippets,
         "page_facts": facts,
+        "page_rating": parser.structured_rating,
+        "page_review_count": parser.structured_review_count,
     }
 
 

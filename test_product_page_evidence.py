@@ -35,7 +35,7 @@ def _fake_urlopen(_request_obj, timeout=0):
         <title>특대형 빅사이즈 KF94 마스크 30매</title>
         <meta name="description" content="얼큰이와 대두도 편하게 쓸 수 있는 특대형 KF94 마스크" />
         <script type="application/ld+json">
-          {"@context":"https://schema.org","@type":"Product","name":"특대형 빅사이즈 KF94 마스크","description":"큰 얼굴에 맞는 넉넉한 사이즈","brand":{"@type":"Brand","name":"이온플러스"}}
+          {"@context":"https://schema.org","@type":"Product","name":"특대형 빅사이즈 KF94 마스크","description":"큰 얼굴에 맞는 넉넉한 사이즈","brand":{"@type":"Brand","name":"이온플러스"},"aggregateRating":{"@type":"AggregateRating","ratingValue":"4.8","reviewCount":"1324"}}
         </script>
       </head>
       <body>
@@ -63,6 +63,19 @@ class ProductPageEvidenceTests(unittest.TestCase):
             "https://www.coupang.com/vp/products/7551562122?itemId=19874489288&vendorItemId=79840900617",
         )
 
+    def test_build_product_page_url_accepts_affiliate_redirect(self):
+        # Coupang Partners search results typically carry productUrl = link.coupang.com/re/…
+        # without itemId/vendorItemId. The fetch layer follows the 302 to the canonical page,
+        # so we must allow link.coupang.com through here instead of returning None.
+        product = {
+            "productUrl": "https://link.coupang.com/re/AFFSDP?lptag=AF0000000&subid=abc",
+        }
+
+        self.assertEqual(
+            build_product_page_url(product),
+            "https://link.coupang.com/re/AFFSDP?lptag=AF0000000&subid=abc",
+        )
+
     def test_fetch_product_page_evidence_extracts_title_description_and_snippets(self):
         product = {
             "metadata": {
@@ -79,6 +92,23 @@ class ProductPageEvidenceTests(unittest.TestCase):
         self.assertIn("대두", evidence["page_description"])
         self.assertGreaterEqual(len(evidence["page_snippets"]), 1)
         self.assertTrue(any("Landing page brand" in fact for fact in evidence["page_facts"]))
+
+    def test_fetch_product_page_evidence_extracts_aggregate_rating(self):
+        product = {
+            "metadata": {
+                "productId": 7551562122,
+                "itemId": 19874489288,
+                "vendorItemId": 79840900617,
+            }
+        }
+
+        evidence = fetch_product_page_evidence(product, opener=_fake_urlopen)
+
+        self.assertIsNotNone(evidence)
+        self.assertAlmostEqual(evidence["page_rating"], 4.8, places=2)
+        self.assertEqual(evidence["page_review_count"], 1324)
+        self.assertTrue(any("Landing page rating: 4.8" in fact for fact in evidence["page_facts"]))
+        self.assertTrue(any("Landing page review count: 1324" in fact for fact in evidence["page_facts"]))
 
     def test_enrich_products_with_page_evidence_merges_description(self):
         products = [
