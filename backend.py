@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import threading
@@ -6,9 +7,10 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, urlsplit
 
 from analytics import AnalyticsStore, build_analytics_store_from_env
-from client import CoupangPartnersClient
+from client import CoupangApiError, CoupangPartnersClient
 from economics import build_economics_summary
 from recommendation import (
     DISCLOSURE_TEXT,
@@ -40,11 +42,571 @@ from security import (
 from url_shortener import BuiltinShortener, FirestoreShortener, UrlShortener
 
 
+# Surface enum per spec acquihire-sprint-1mo decision D9. Enum members are the fixed
+# identifiers surfaces should send on `x-openclaw-surface`; the `claw-*` wildcard prefix
+# (e.g., claw-shopping) is accepted separately so forks of the openclaw skill can self-tag
+# without waiting on an enum change.
+_SURFACE_ENUM = frozenset(
+    {
+        "claude-code-skill",
+        "chatgpt-gpt",
+        "codex",
+        "claude-project",
+        "openclaw-skill",
+        "cli",
+        "mcp",
+    }
+)
+
+# Warn at most once per unknown surface string to avoid log spam on high-volume clients.
+# Module-level set is fine — `_Handler` is per-request but shares the interpreter.
+_WARNED_UNKNOWN_SURFACES: set = set()
+_WARNED_UNKNOWN_SURFACES_LOCK = threading.Lock()
+
+
+def _normalize_surface(raw_value: Optional[str]) -> Tuple[str, Optional[str]]:
+    """Return (normalized_surface, surface_raw).
+
+    - Empty/missing → ("unknown", None) so the column reflects "unattributed request" rather
+      than "bad header value".
+    - Value in the known enum or matching the `claw-*` prefix → (value, None).
+    - Otherwise → ("unknown", original_trimmed_value). A warning is emitted once per
+      unrecognized value per process lifetime.
+    """
+
+    if not raw_value:
+        return "unknown", None
+    trimmed = raw_value.strip()
+    if not trimmed:
+        return "unknown", None
+    lowered = trimmed.lower()
+    if lowered in _SURFACE_ENUM:
+        return lowered, None
+    if lowered.startswith("claw-") and len(lowered) > len("claw-"):
+        return lowered, None
+    with _WARNED_UNKNOWN_SURFACES_LOCK:
+        first_seen = lowered not in _WARNED_UNKNOWN_SURFACES
+        if first_seen:
+            _WARNED_UNKNOWN_SURFACES.add(lowered)
+    if first_seen:
+        log_event("surface_enum_unknown", surface_raw=trimmed[:64])
+    return "unknown", trimmed[:128]
+
+
+def _attribution_kwargs(attribution: Optional[Dict[str, Optional[str]]]) -> Dict[str, Optional[str]]:
+    """Translate the attribution context dict into kwargs accepted by AnalyticsStore.record_event.
+
+    Returns an empty dict when `attribution` is None so `record_event` keeps its pre-spec
+    behavior for callers that have not been updated yet (e.g., book_intel tests).
+    """
+
+    if not attribution:
+        return {}
+    return {
+        "surface": attribution.get("surface"),
+        "surface_raw": attribution.get("surface_raw"),
+        "client_id": attribution.get("client_id"),
+        "client_version": attribution.get("client_version"),
+        "utm_source": attribution.get("utm_source"),
+    }
+
+
+def _anonymous_client_id(remote_addr: Optional[str]) -> str:
+    """Deterministic fallback so anonymous traffic still gets a stable session bucket.
+
+    SHA1 of the normalized IP → hex-truncated. Matches the 'anonymous-<IP hash>' fallback
+    specified in acquihire-sprint-1mo D4/D9. SHA1 is not a security choice here; it's
+    cheap and widely understood, and the input is a short IP string.
+    """
+
+    source = (remote_addr or "unknown").encode("utf-8")
+    digest = hashlib.sha1(source).hexdigest()[:16]
+    return f"anonymous-{digest}"
+
+
 class BackendError(RuntimeError):
     def __init__(self, status: int, message: str):
         self.status = status
         self.message = message
         super().__init__(message)
+
+
+# ---------------------------------------------------------------------------- #
+# OpenAPI 3.1 document (spec R1.2 / acquihire-sprint-1mo T2)
+# ---------------------------------------------------------------------------- #
+# Kept as a module-level constant so `GET /openapi.json` is a O(1) serialize. The
+# schema intentionally uses only static values — no dynamic env-derived URLs — so
+# consumers (GPT Store, Claude Code marketplace, Swagger UI) get a stable,
+# cache-friendly document. Header schema per spec D9: surface enum, client_id,
+# version, utm_source.
+
+_OPENAPI_ATTRIBUTION_HEADER_PARAMS: List[Dict[str, Any]] = [
+    {
+        "name": "x-openclaw-surface",
+        "in": "header",
+        "description": (
+            "Caller surface tag. Known values: claude-code-skill, chatgpt-gpt, codex, "
+            "claude-project, openclaw-skill, cli, mcp. Values matching the `claw-*` prefix "
+            "(e.g., claw-shopping) are also accepted. Anything else is normalized server-side "
+            "to 'unknown' with the raw value preserved in analytics (never rejected)."
+        ),
+        "required": False,
+        "schema": {
+            "type": "string",
+            "enum": [
+                "claude-code-skill",
+                "chatgpt-gpt",
+                "codex",
+                "claude-project",
+                "openclaw-skill",
+                "cli",
+                "mcp",
+                "unknown",
+            ],
+            "x-openclaw-wildcard-prefix": "claw-",
+        },
+        "example": "chatgpt-gpt",
+    },
+    {
+        "name": "x-openclaw-client-id",
+        "in": "header",
+        "description": (
+            "Stable per-caller identifier (UUID v4 recommended). When missing, the server "
+            "derives a deterministic `anonymous-<sha1(ip)[:16]>` fallback so anonymous "
+            "traffic still gets a stable session bucket."
+        ),
+        "required": False,
+        "schema": {"type": "string", "maxLength": 128},
+        "example": "a8f1c2b4-1234-4abc-8def-0123456789ab",
+    },
+    {
+        "name": "x-openclaw-version",
+        "in": "header",
+        "description": "Integrator-provided version string (best-effort). Truncated to 64 chars.",
+        "required": False,
+        "schema": {"type": "string", "maxLength": 64},
+        "example": "1.2.3",
+    },
+]
+
+_OPENAPI_UTM_QUERY_PARAM: Dict[str, Any] = {
+    "name": "utm_source",
+    "in": "query",
+    "description": "Ad-campaign attribution source (paid-marketing rollups per spec D7/R4.4).",
+    "required": False,
+    "schema": {"type": "string", "maxLength": 128},
+    "example": "x-daily-builder",
+}
+
+
+def _public_endpoint_parameters() -> List[Dict[str, Any]]:
+    """Common parameters shared by every `/v1/public/*` endpoint (headers + utm)."""
+
+    return list(_OPENAPI_ATTRIBUTION_HEADER_PARAMS) + [dict(_OPENAPI_UTM_QUERY_PARAM)]
+
+
+_OPENAPI_DOCUMENT: Dict[str, Any] = {
+    "openapi": "3.1.0",
+    "info": {
+        "title": "OpenClaw Shopping Backend",
+        "description": (
+            "Korean agent-shopping intent routing layer. Public tokenless endpoints for "
+            "agent surfaces (Claude Code skill, ChatGPT GPT, OpenAI Codex, MCP, CLI) to "
+            "submit shopping intents, fetch goldbox/best deals, and resolve affiliate "
+            "short links. All public endpoints accept the 4 attribution headers defined "
+            "in acquihire-sprint-1mo spec D9 (see parameters). Affiliate disclosure "
+            "(`DISCLOSURE_TEXT`) is returned on every response that surfaces an affiliate "
+            "link — do not strip it."
+        ),
+        "version": "1.0.0",
+        "contact": {"name": "Retention Inc", "url": "https://retn.kr"},
+    },
+    "servers": [
+        {"url": "https://a.retn.kr", "description": "Production"},
+    ],
+    "paths": {
+        "/health": {
+            "get": {
+                "summary": "Liveness probe",
+                "description": "Unauthenticated liveness check. Returns service identity.",
+                "responses": {
+                    "200": {
+                        "description": "Service is up",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "ok": {"type": "boolean"},
+                                        "service": {"type": "string"},
+                                        "version": {"type": "string"},
+                                        "requestId": {"type": "string"},
+                                    },
+                                    "required": ["ok"],
+                                }
+                            }
+                        },
+                    }
+                },
+            }
+        },
+        "/v1/public/assist": {
+            "post": {
+                "summary": "Recommend products for a shopping intent",
+                "description": (
+                    "Primary shopping-intent endpoint. Accepts a natural-language query "
+                    "plus optional constraints/evidence and returns ranked product "
+                    "recommendations with affiliate deeplinks and short links. Set "
+                    "`vertical=book` to route through the book_reco pipeline."
+                ),
+                "parameters": _public_endpoint_parameters(),
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/AssistRequest"},
+                            "example": {
+                                "query": "30만원 이하 무선청소기, 원룸용",
+                                "constraints": {"must_have": ["저소음"], "avoid": ["대형"]},
+                                "evidence_snippets": [
+                                    {"text": "리뷰: 자취방에 잘 맞음", "source": "manual"}
+                                ],
+                            },
+                        }
+                    },
+                },
+                "responses": {
+                    "200": {
+                        "description": "Ranked recommendations",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/AssistResponse"}
+                            }
+                        },
+                    },
+                    "400": {"$ref": "#/components/responses/BadRequest"},
+                    "429": {"$ref": "#/components/responses/RateLimited"},
+                },
+            }
+        },
+        "/v1/public/search": {
+            "post": {
+                "summary": "Coupang keyword product search",
+                "description": (
+                    "Thin wrapper over Coupang Partners product search. Supports "
+                    "rocket-only filter, max-price filter, and sort order "
+                    "(SIM|SALE|LOW|HIGH)."
+                ),
+                "parameters": _public_endpoint_parameters(),
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/SearchRequest"},
+                            "example": {
+                                "keyword": "무선청소기",
+                                "rocket_only": True,
+                                "max_price": 300000,
+                                "sort": "LOW",
+                                "limit": 5,
+                            },
+                        }
+                    },
+                },
+                "responses": {
+                    "200": {
+                        "description": "Search results",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/SearchResponse"}
+                            }
+                        },
+                    },
+                    "400": {"$ref": "#/components/responses/BadRequest"},
+                    "429": {"$ref": "#/components/responses/RateLimited"},
+                },
+            }
+        },
+        "/v1/public/goldbox": {
+            "get": {
+                "summary": "Coupang goldbox (daily deals)",
+                "description": "Returns the current Coupang goldbox deal list with short-link enriched deeplinks.",
+                "parameters": _public_endpoint_parameters(),
+                "responses": {
+                    "200": {
+                        "description": "Goldbox deal list",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/GoldboxResponse"}
+                            }
+                        },
+                    },
+                    "429": {"$ref": "#/components/responses/RateLimited"},
+                },
+            }
+        },
+        "/v1/public/best/{category}": {
+            "get": {
+                "summary": "Coupang best-sellers by category",
+                "description": "Returns best-sellers for a numeric Coupang category id.",
+                "parameters": [
+                    {
+                        "name": "category",
+                        "in": "path",
+                        "required": True,
+                        "description": "Coupang category id (numeric string).",
+                        "schema": {"type": "string", "pattern": "^[0-9]+$"},
+                        "example": "1001",
+                    },
+                    *_public_endpoint_parameters(),
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Category best-seller list",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/BestResponse"}
+                            }
+                        },
+                    },
+                    "400": {"$ref": "#/components/responses/BadRequest"},
+                    "429": {"$ref": "#/components/responses/RateLimited"},
+                },
+            }
+        },
+        "/s/{slug}": {
+            "get": {
+                "summary": "Resolve and redirect an affiliate short link",
+                "description": (
+                    "302-redirects to the original Coupang affiliate URL registered under "
+                    "the slug. Logs a `book_click` / shortlink_redirect event for "
+                    "feedback and WAS attribution."
+                ),
+                "parameters": [
+                    {
+                        "name": "slug",
+                        "in": "path",
+                        "required": True,
+                        "description": "Short-link slug.",
+                        "schema": {"type": "string"},
+                    },
+                    *_OPENAPI_ATTRIBUTION_HEADER_PARAMS,
+                ],
+                "responses": {
+                    "302": {
+                        "description": "Redirect to the affiliate URL",
+                        "headers": {
+                            "Location": {"schema": {"type": "string", "format": "uri"}},
+                            "X-Request-Id": {"schema": {"type": "string"}},
+                        },
+                    },
+                    "404": {
+                        "description": "Slug is not registered",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/Error"}
+                            }
+                        },
+                    },
+                },
+            }
+        },
+    },
+    "components": {
+        "schemas": {
+            "AssistRequest": {
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {"type": "string", "description": "Natural-language shopping intent."},
+                    "vertical": {
+                        "type": "string",
+                        "description": "Optional vertical router. 'book' routes through book_reco.",
+                        "enum": ["book"],
+                    },
+                    "constraints": {
+                        "type": "object",
+                        "properties": {
+                            "must_have": {"type": "array", "items": {"type": "string"}},
+                            "avoid": {"type": "array", "items": {"type": "string"}},
+                        },
+                    },
+                    "evidence_snippets": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["text"],
+                            "properties": {
+                                "text": {"type": "string"},
+                                "source": {"type": "string"},
+                            },
+                        },
+                    },
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+                },
+            },
+            "AssistResponse": {
+                "type": "object",
+                "properties": {
+                    "best_fit": {"$ref": "#/components/schemas/Recommendation"},
+                    "alternates": {
+                        "type": "array",
+                        "items": {"$ref": "#/components/schemas/Recommendation"},
+                    },
+                    "normalized_intent": {"type": "object"},
+                    "summary": {"type": "string"},
+                    "disclosure": {"type": "string", "description": "Affiliate disclosure text (must not be stripped)."},
+                    "query_id": {"type": "string"},
+                    "requestId": {"type": "string"},
+                },
+            },
+            "Recommendation": {
+                "type": "object",
+                "properties": {
+                    "product_id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "price": {"type": "integer"},
+                    "deeplink": {"type": "string", "format": "uri"},
+                    "short_deeplink": {"type": "string", "format": "uri"},
+                    "rating": {"type": "number"},
+                    "review_count": {"type": "integer"},
+                },
+            },
+            "SearchRequest": {
+                "type": "object",
+                "required": ["keyword"],
+                "properties": {
+                    "keyword": {"type": "string", "maxLength": 200},
+                    "rocket_only": {"type": "boolean"},
+                    "max_price": {"type": "integer", "minimum": 0},
+                    "sort": {"type": "string", "enum": ["SIM", "SALE", "LOW", "HIGH"]},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+                },
+            },
+            "SearchResponse": {
+                "type": "object",
+                "properties": {
+                    "ok": {"type": "boolean"},
+                    "data": {
+                        "type": "object",
+                        "properties": {
+                            "keyword": {"type": "string"},
+                            "results": {
+                                "type": "array",
+                                "items": {"$ref": "#/components/schemas/SearchResult"},
+                            },
+                            "total": {"type": "integer"},
+                        },
+                    },
+                    "disclosure": {"type": "string"},
+                    "requestId": {"type": "string"},
+                },
+            },
+            "SearchResult": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "price": {"type": "integer"},
+                    "is_rocket": {"type": "boolean"},
+                    "is_free_shipping": {"type": "boolean"},
+                    "rating": {"type": "number"},
+                    "review_count": {"type": "integer"},
+                    "deeplink": {"type": "string", "format": "uri"},
+                    "short_deeplink": {"type": "string", "format": "uri"},
+                },
+            },
+            "GoldboxResponse": {
+                "type": "object",
+                "properties": {
+                    "ok": {"type": "boolean"},
+                    "data": {
+                        "type": "object",
+                        "properties": {
+                            "deals": {
+                                "type": "array",
+                                "items": {"$ref": "#/components/schemas/SearchResult"},
+                            },
+                            "fetched_at": {"type": "string", "format": "date-time"},
+                        },
+                    },
+                    "disclosure": {"type": "string"},
+                    "requestId": {"type": "string"},
+                },
+            },
+            "BestResponse": {
+                "type": "object",
+                "properties": {
+                    "ok": {"type": "boolean"},
+                    "data": {
+                        "type": "object",
+                        "properties": {
+                            "category_id": {"type": "string"},
+                            "products": {
+                                "type": "array",
+                                "items": {"$ref": "#/components/schemas/SearchResult"},
+                            },
+                        },
+                    },
+                    "disclosure": {"type": "string"},
+                    "requestId": {"type": "string"},
+                },
+            },
+            "Error": {
+                "type": "object",
+                "properties": {
+                    "error": {"type": "string"},
+                    "requestId": {"type": "string"},
+                },
+                "required": ["error"],
+            },
+        },
+        "responses": {
+            "BadRequest": {
+                "description": "Request validation failed",
+                "content": {
+                    "application/json": {
+                        "schema": {"$ref": "#/components/schemas/Error"}
+                    }
+                },
+            },
+            "RateLimited": {
+                "description": "Rate limit exceeded for the public bucket",
+                "content": {
+                    "application/json": {
+                        "schema": {"$ref": "#/components/schemas/Error"}
+                    }
+                },
+            },
+        },
+    },
+}
+
+
+_DOCS_HTML = """<!doctype html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\" />
+  <title>OpenClaw Shopping API - Docs</title>
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css\" />
+  <style>body { margin: 0; } #swagger-ui { max-width: 1200px; margin: 0 auto; }</style>
+</head>
+<body>
+  <div id=\"swagger-ui\"></div>
+  <script src=\"https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js\" crossorigin></script>
+  <script>
+    window.addEventListener('load', function () {
+      window.ui = SwaggerUIBundle({
+        url: '/openapi.json',
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        layout: 'BaseLayout'
+      });
+    });
+  </script>
+</body>
+</html>
+"""
 
 
 class ShoppingBackend:
@@ -89,22 +651,39 @@ class ShoppingBackend:
             "version": "mvp",
         }
 
-    def assist(self, payload: Dict[str, Any], *, client_id: Optional[str] = None) -> Dict[str, Any]:
+    def assist(
+        self,
+        payload: Dict[str, Any],
+        *,
+        client_id: Optional[str] = None,
+        attribution: Optional[Dict[str, Optional[str]]] = None,
+    ) -> Dict[str, Any]:
         payload_error = validate_payload_limits(payload)
         if payload_error:
             raise BackendError(HTTPStatus.BAD_REQUEST, payload_error)
         if (payload.get("vertical") or "").strip().lower() == "book":
-            return self._book_assist(payload, client_id=client_id)
+            return self._book_assist(payload, client_id=client_id, attribution=attribution)
         normalized = normalize_request(payload)
         query = normalized["query"]
         if not query:
             raise BackendError(HTTPStatus.BAD_REQUEST, "'query' is required")
         evidence_snippets = _normalize_evidence_snippets(payload.get("evidence_snippets") or [])
         search_plan = build_search_queries(normalized)
-        products = self._search_products(
-            query=query,
-            search_plan=search_plan,
-        )
+        degraded_reason: Optional[str] = None
+        try:
+            products = self._search_products(
+                query=query,
+                search_plan=search_plan,
+            )
+        except CoupangApiError as exc:
+            products = []
+            degraded_reason = f"coupang_api_status_{exc.status_code}"
+            log_event(
+                "coupang_search_degraded",
+                query=query,
+                status_code=exc.status_code,
+                reason=str(exc)[:200],
+            )
         products = enrich_products_with_page_evidence(
             products,
             max_products=_page_evidence_max_products_from_env(),
@@ -137,12 +716,23 @@ class ShoppingBackend:
             )
         except Exception as exc:
             log_event("analytics_error", stage="record_assist", query=query, error=str(exc))
-        return build_assist_response(
+        # Emit an attribution-tagged `assist` event so WAS/session aggregation (T3) can
+        # count a session per request without re-deriving from queries. Spec R1.1 requires
+        # an `event_type='assist'` row with the 4 attribution columns populated.
+        self._record_attribution_event(
+            event_type="assist",
+            query_id=query_id,
+            attribution=attribution,
+        )
+        response = build_assist_response(
             normalized=normalized,
             search_plan=search_plan,
             recommendations=recommendations,
             query_id=query_id,
         )
+        if degraded_reason:
+            response["degraded"] = degraded_reason
+        return response
 
     def deeplinks(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         urls = payload.get("urls") or payload.get("coupangUrls") or []
@@ -226,7 +816,12 @@ class ShoppingBackend:
 
         return self._cache_get_or_compute(f"best:{category_id}", _compute)
 
-    def record_event(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def record_event(
+        self,
+        payload: Dict[str, Any],
+        *,
+        attribution: Optional[Dict[str, Optional[str]]] = None,
+    ) -> Dict[str, Any]:
         event_type = (payload.get("event_type") or "").strip()
         if not event_type:
             raise BackendError(HTTPStatus.BAD_REQUEST, "'event_type' is required")
@@ -235,8 +830,32 @@ class ShoppingBackend:
             query_id=payload.get("query_id"),
             recommendation_id=payload.get("recommendation_id"),
             metadata=payload.get("metadata") or {},
+            **_attribution_kwargs(attribution),
         )
         return {"ok": True, "event_id": event_id}
+
+    def _record_attribution_event(
+        self,
+        *,
+        event_type: str,
+        query_id: Optional[str],
+        attribution: Optional[Dict[str, Optional[str]]],
+    ) -> None:
+        """Best-effort write of a single tagged event row for the current request.
+
+        Swallows exceptions the same way `record_assist` does so analytics failures never
+        take down a request. The attribution dict carries the 4 spec-D9 columns.
+        """
+
+        try:
+            self.analytics_store.record_event(
+                event_type=event_type,
+                query_id=query_id,
+                metadata={},
+                **_attribution_kwargs(attribution),
+            )
+        except Exception as exc:
+            log_event("analytics_error", stage="record_attribution_event", event_type=event_type, error=str(exc))
 
     def summary(self) -> Dict[str, Any]:
         summary = self.analytics_store.get_summary()
@@ -290,6 +909,7 @@ class ShoppingBackend:
         payload: Dict[str, Any],
         *,
         client_id: Optional[str] = None,
+        attribution: Optional[Dict[str, Optional[str]]] = None,
     ) -> Dict[str, Any]:
         # Imported lazily so the book vertical never pulls its providers into cold paths.
         from book_reco.backend_integration import book_assist
@@ -327,6 +947,12 @@ class ShoppingBackend:
             )
         except Exception as exc:
             log_event("analytics_error", stage="record_book_assist", error=str(exc))
+
+        self._record_attribution_event(
+            event_type="assist",
+            query_id=None,
+            attribution=attribution,
+        )
 
         return response
 
@@ -418,6 +1044,7 @@ class _Handler(BaseHTTPRequestHandler):
                             "client_id": self._client_id_from_headers(),
                             "referer": (self.headers.get("Referer") or "")[:200],
                         },
+                        **_attribution_kwargs(self._attribution_context()),
                     )
                 except Exception as exc:
                     log_event("feedback_error", stage="book_click", slug=slug, error=str(exc))
@@ -429,6 +1056,17 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             if self.path in ("/health", "/healthz"):
                 self._send_json(HTTPStatus.OK, {**self.backend.health(), "requestId": request_id}, head_only=head_only)
+                return
+            if self.path == "/openapi.json":
+                # Public, unauthenticated spec endpoint per spec R1.2. Kept outside the
+                # rate-limiter so GPT Store / Swagger UI / CDN fetchers don't eat into
+                # the shared public bucket.
+                self._send_json(HTTPStatus.OK, _OPENAPI_DOCUMENT, head_only=head_only)
+                return
+            if self.path in ("/docs", "/docs/"):
+                # Swagger UI served via CDN (stdlib-only requirement forbids bundling
+                # the assets). Points the UI at /openapi.json.
+                self._send_html(HTTPStatus.OK, _DOCS_HTML, head_only=head_only)
                 return
             if self.path == "/v1/admin/summary":
                 if not _operator_routes_enabled():
@@ -469,37 +1107,50 @@ class _Handler(BaseHTTPRequestHandler):
         remote_addr = normalize_client_ip(self.client_address[0] if self.client_address else None)
         try:
             payload = self._read_json()
-            if self.path == "/v1/public/search":
+            # Strip query string for route matching so public endpoints accept
+            # `?utm_source=...` (spec D9/R4.4 campaign attribution) without 404-ing.
+            path_only = urlsplit(self.path).path
+            if path_only == "/v1/public/search":
                 client_marker = self._authorize_public(request_id=request_id, remote_addr=remote_addr)
                 response = self.backend.search(payload)
                 log_event("search_ok", request_id=request_id, remote_addr=remote_addr, client=client_marker)
                 self._send_json(HTTPStatus.OK, {**response, "requestId": request_id})
                 return
-            if self.path in ("/v1/public/assist", "/v1/public/recommendations"):
+            if path_only in ("/v1/public/assist", "/v1/public/recommendations"):
                 client_marker = self._authorize_public(request_id=request_id, remote_addr=remote_addr)
-                response = self.backend.assist(payload, client_id=self._client_id_from_headers())
+                attribution = self._attribution_context()
+                response = self.backend.assist(
+                    payload,
+                    client_id=self._client_id_from_headers(),
+                    attribution=attribution,
+                )
                 log_event("assist_ok", request_id=request_id, path=self.path, remote_addr=remote_addr, client=client_marker)
                 self._send_json(HTTPStatus.OK, {**response, "requestId": request_id})
                 return
-            if self.path in ("/v1/assist", "/v1/recommendations", "/internal/v1/assist", "/internal/v1/recommendations"):
+            if path_only in ("/v1/assist", "/v1/recommendations", "/internal/v1/assist", "/internal/v1/recommendations"):
                 if not _operator_routes_enabled():
                     self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id})
                     return
                 client_marker = self._authorize_internal(request_id=request_id, remote_addr=remote_addr)
-                response = self.backend.assist(payload, client_id=self._client_id_from_headers())
+                attribution = self._attribution_context()
+                response = self.backend.assist(
+                    payload,
+                    client_id=self._client_id_from_headers(),
+                    attribution=attribution,
+                )
                 log_event("assist_ok", request_id=request_id, path=self.path, remote_addr=remote_addr, client=client_marker)
                 self._send_json(HTTPStatus.OK, {**response, "requestId": request_id})
                 return
-            if self.path in ("/v1/events", "/internal/v1/events"):
+            if path_only in ("/v1/events", "/internal/v1/events"):
                 if not _operator_routes_enabled():
                     self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id})
                     return
                 client_marker = self._authorize_internal(request_id=request_id, remote_addr=remote_addr)
-                response = self.backend.record_event(payload)
+                response = self.backend.record_event(payload, attribution=self._attribution_context())
                 log_event("event_ok", request_id=request_id, path=self.path, remote_addr=remote_addr, client=client_marker)
                 self._send_json(HTTPStatus.OK, {**response, "requestId": request_id})
                 return
-            if self.path in ("/v1/deeplinks", "/internal/v1/deeplinks"):
+            if path_only in ("/v1/deeplinks", "/internal/v1/deeplinks"):
                 if not _operator_routes_enabled():
                     self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id})
                     return
@@ -536,6 +1187,52 @@ class _Handler(BaseHTTPRequestHandler):
                 return value[:128]
         return None
 
+    def _attribution_context(self) -> Dict[str, Optional[str]]:
+        """Parse the 4 attribution inputs per spec D9/R1.1/R1.5.
+
+        Headers:
+          - x-openclaw-surface → normalized enum or 'unknown' (raw preserved on mismatch).
+          - x-openclaw-client-id → otherwise `anonymous-<sha1 of ip>` fallback.
+          - x-openclaw-version → raw string, truncated. Empty string when missing.
+        Query string:
+          - utm_source → ad-campaign attribution (paid-marketing rollups per D7/R4.4).
+
+        Returned as a plain dict so it can be splatted into analytics writes and passed
+        through to the ShoppingBackend without dragging a dataclass import.
+        """
+
+        raw_surface = self.headers.get("X-OpenClaw-Surface")
+        surface, surface_raw = _normalize_surface(raw_surface)
+
+        client_id = self._client_id_from_headers()
+        if not client_id:
+            remote_addr = normalize_client_ip(
+                self.client_address[0] if self.client_address else None
+            )
+            client_id = _anonymous_client_id(remote_addr)
+
+        raw_version = (self.headers.get("X-OpenClaw-Version") or "").strip()
+        # Cap at 64 chars to avoid someone pasting a changelog into the header.
+        client_version = raw_version[:64]
+
+        utm_source: Optional[str] = None
+        try:
+            query_string = urlsplit(self.path).query
+            if query_string:
+                values = parse_qs(query_string, keep_blank_values=False).get("utm_source") or []
+                if values:
+                    utm_source = (values[0] or "").strip()[:128] or None
+        except Exception:
+            utm_source = None
+
+        return {
+            "surface": surface,
+            "surface_raw": surface_raw,
+            "client_id": client_id,
+            "client_version": client_version,
+            "utm_source": utm_source,
+        }
+
     def _read_json(self) -> Dict[str, Any]:
         raw_content_length = self.headers.get("Content-Length", "0")
         try:
@@ -554,6 +1251,15 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("X-Request-Id", str(payload.get("requestId", "")))
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        if not head_only:
+            self.wfile.write(encoded)
+
+    def _send_html(self, status: int, body: str, *, head_only: bool = False) -> None:
+        encoded = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         if not head_only:

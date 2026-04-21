@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from urllib import error, request
@@ -157,7 +158,8 @@ class BackendTests(unittest.TestCase):
 
         summary = json.loads(request.urlopen(f"{self.base_url}/v1/admin/summary", timeout=5).read().decode("utf-8"))
         self.assertEqual(summary["total_queries"], 1)
-        self.assertEqual(summary["total_events"], 1)
+        # 2 events: 1 attribution-tagged `assist` (new in spec T1), 1 deeplink_clicked.
+        self.assertEqual(summary["total_events"], 2)
         self.assertEqual(summary["total_short_links"], 1)
         self.assertIn("economics", summary)
         self.assertEqual(summary["economics"]["funnel"]["total_queries"], 1)
@@ -388,6 +390,23 @@ class BackendTests(unittest.TestCase):
         response = backend.assist({"query": "30만원 이하 무선청소기"})
         self.assertEqual(response["best_fit"]["short_deeplink"], "https://www.coupang.com/vp/products/1")
 
+    def test_assist_degrades_gracefully_on_coupang_api_error(self):
+        from client import CoupangApiError
+
+        class FailingAdapter:
+            def search_products(self, **params):
+                raise CoupangApiError(429, {"rCode": "ERROR", "rMessage": "rate limited"})
+
+        backend = ShoppingBackend(
+            adapter=FailingAdapter(),
+            analytics_store=AnalyticsStore(f"{self.tempdir.name}/degraded.sqlite3"),
+        )
+        response = backend.assist({"query": "30만원 이하 무선청소기"})
+        # Empty shortlist instead of HTTP 500 — contract k-skill relies on.
+        self.assertEqual(response["shortlist"], [])
+        self.assertIsNone(response["best_fit"])
+        self.assertEqual(response["degraded"], "coupang_api_status_429")
+
     def test_assist_does_not_shorten_invalid_recommendation_targets(self):
         class InvalidUrlAdapter(FakeAdapter):
             def search_products(self, **params):
@@ -439,6 +458,176 @@ class BackendTests(unittest.TestCase):
             request.urlopen(request_obj, timeout=5)
         self.assertEqual(ctx.exception.code, 404)
         ctx.exception.close()
+
+    # ------------------------------------------------------------------ #
+    # T1 attribution header parsing + analytics persistence (spec D9/R1.1/R1.5)
+    # ------------------------------------------------------------------ #
+
+    def _read_assist_events(self):
+        """Return rows from `events` with `event_type='assist'`, newest first.
+
+        The assist events are emitted by the attribution-tagging middleware added in T1 —
+        one per /v1/public/assist POST — and carry the 4 attribution columns.
+        """
+
+        db_path = f"{self.tempdir.name}/analytics.sqlite3"
+        with sqlite3.connect(db_path) as connection:
+            rows = connection.execute(
+                "SELECT event_type, surface, surface_raw, client_id, client_version, utm_source "
+                "FROM events WHERE event_type = 'assist' ORDER BY created_at DESC"
+            ).fetchall()
+        return rows
+
+    def test_attribution_headers_happy_path_persists_all_four_values(self):
+        """Spec R1.1: 3 headers + utm_source query must all end up on the assist event."""
+
+        assist_request = request.Request(
+            f"{self.base_url}/v1/public/assist?utm_source=x-daily-builder",
+            data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-OpenClaw-Surface": "chatgpt-gpt",
+                "X-OpenClaw-Client-Id": "uuid-123",
+                "X-OpenClaw-Version": "1.2.3",
+            },
+            method="POST",
+        )
+        response = json.loads(request.urlopen(assist_request, timeout=5).read().decode("utf-8"))
+        self.assertIn("best_fit", response)
+
+        rows = self._read_assist_events()
+        self.assertEqual(len(rows), 1)
+        event_type, surface, surface_raw, client_id, client_version, utm_source = rows[0]
+        self.assertEqual(event_type, "assist")
+        self.assertEqual(surface, "chatgpt-gpt")
+        self.assertIsNone(surface_raw)
+        self.assertEqual(client_id, "uuid-123")
+        self.assertEqual(client_version, "1.2.3")
+        self.assertEqual(utm_source, "x-daily-builder")
+
+    def test_attribution_unknown_surface_normalizes_and_preserves_raw(self):
+        """Spec R1.5: unrecognized surface → 'unknown' + raw preserved + request succeeds."""
+
+        assist_request = request.Request(
+            f"{self.base_url}/v1/public/assist",
+            data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-OpenClaw-Surface": "some-weird-value",
+                "X-OpenClaw-Client-Id": "uuid-456",
+            },
+            method="POST",
+        )
+        # Must still return 200 — warn, don't reject.
+        response = json.loads(request.urlopen(assist_request, timeout=5).read().decode("utf-8"))
+        self.assertIn("best_fit", response)
+
+        rows = self._read_assist_events()
+        self.assertEqual(len(rows), 1)
+        _, surface, surface_raw, client_id, _, _ = rows[0]
+        self.assertEqual(surface, "unknown")
+        self.assertEqual(surface_raw, "some-weird-value")
+        self.assertEqual(client_id, "uuid-456")
+
+    # ------------------------------------------------------------------ #
+    # T2 OpenAPI spec + /docs surface (spec R1.2)
+    # ------------------------------------------------------------------ #
+
+    def test_openapi_json_documents_public_endpoints_and_attribution_headers(self):
+        """Spec R1.2: /openapi.json must be a valid OpenAPI 3.1 doc that documents
+        the /v1/public/assist endpoint with all four attribution parameters (3 headers
+        + utm_source query). GPT Store and Claude Code skill submissions rely on this."""
+
+        response = request.urlopen(f"{self.base_url}/openapi.json", timeout=5)
+        self.assertEqual(response.status, 200)
+        content_type = response.headers.get("Content-Type", "")
+        self.assertIn("application/json", content_type)
+        body = json.loads(response.read().decode("utf-8"))
+        response.close()
+
+        # Top-level shape.
+        self.assertTrue(body["openapi"].startswith("3.1"), f"unexpected openapi version: {body['openapi']!r}")
+        self.assertIn("info", body)
+        self.assertIn("title", body["info"])
+        self.assertIn("version", body["info"])
+        self.assertIn("servers", body)
+        self.assertTrue(
+            any(server.get("url") == "https://a.retn.kr" for server in body["servers"]),
+            "Production server https://a.retn.kr must be in servers[]",
+        )
+
+        # Paths cover every public route exposed by the current backend.
+        paths = body.get("paths", {})
+        for expected in (
+            "/health",
+            "/v1/public/assist",
+            "/v1/public/search",
+            "/v1/public/goldbox",
+            "/v1/public/best/{category}",
+            "/s/{slug}",
+        ):
+            self.assertIn(expected, paths, f"expected path {expected} in OpenAPI doc")
+
+        # /v1/public/assist must document the 4 attribution parameters (3 headers + utm_source).
+        assist_post = paths["/v1/public/assist"]["post"]
+        params = assist_post.get("parameters", [])
+        param_names = {(p.get("name"), p.get("in")) for p in params}
+        for expected_param in (
+            ("x-openclaw-surface", "header"),
+            ("x-openclaw-client-id", "header"),
+            ("x-openclaw-version", "header"),
+            ("utm_source", "query"),
+        ):
+            self.assertIn(
+                expected_param,
+                param_names,
+                f"assist endpoint missing attribution param {expected_param}",
+            )
+
+        # 200/400/429 responses defined for the assist endpoint.
+        responses_block = assist_post.get("responses", {})
+        for code in ("200", "400", "429"):
+            self.assertIn(code, responses_block)
+
+    def test_docs_serves_swagger_ui_pointing_at_openapi_json(self):
+        """Spec R1.2: /docs returns HTML that loads Swagger UI (or equivalent) and
+        points it at /openapi.json so developers can explore the API in a browser."""
+
+        response = request.urlopen(f"{self.base_url}/docs", timeout=5)
+        self.assertEqual(response.status, 200)
+        self.assertIn("text/html", response.headers.get("Content-Type", ""))
+        body = response.read().decode("utf-8")
+        response.close()
+        # Must reference /openapi.json and include at least one <script> or <link>.
+        self.assertIn("/openapi.json", body)
+        self.assertTrue(
+            "<script" in body or "<link" in body,
+            "docs page must include script/link tag for the UI bundle",
+        )
+
+    def test_attribution_missing_client_id_falls_back_to_anonymous_hash(self):
+        """Spec D9: missing x-openclaw-client-id → deterministic 'anonymous-<ip hash>'."""
+
+        assist_request = request.Request(
+            f"{self.base_url}/v1/public/assist",
+            data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                # Intentionally no X-OpenClaw-Client-Id.
+                "X-OpenClaw-Surface": "cli",
+            },
+            method="POST",
+        )
+        response = json.loads(request.urlopen(assist_request, timeout=5).read().decode("utf-8"))
+        self.assertIn("best_fit", response)
+
+        rows = self._read_assist_events()
+        self.assertEqual(len(rows), 1)
+        _, surface, _, client_id, _, _ = rows[0]
+        self.assertEqual(surface, "cli")
+        self.assertTrue(client_id.startswith("anonymous-"), f"expected anonymous fallback, got {client_id!r}")
+        # Hash body should be hex and nonempty (length of sha1 truncation).
+        self.assertEqual(len(client_id), len("anonymous-") + 16)
 
 
 class ResponseCacheTests(unittest.TestCase):
