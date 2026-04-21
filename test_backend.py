@@ -388,6 +388,22 @@ class BackendTests(unittest.TestCase):
         response = backend.assist({"query": "30만원 이하 무선청소기"})
         self.assertEqual(response["best_fit"]["short_deeplink"], "https://www.coupang.com/vp/products/1")
 
+    def test_assist_degrades_gracefully_on_coupang_api_error(self):
+        from client import CoupangApiError
+
+        class FailingAdapter:
+            def search_products(self, **params):
+                raise CoupangApiError(429, {"rCode": "ERROR", "rMessage": "rate limited"})
+
+        backend = ShoppingBackend(
+            adapter=FailingAdapter(),
+            analytics_store=AnalyticsStore(f"{self.tempdir.name}/degraded.sqlite3"),
+        )
+        response = backend.assist({"query": "30만원 이하 무선청소기"})
+        self.assertEqual(response["shortlist"], [])
+        self.assertIsNone(response["best_fit"])
+        self.assertEqual(response["degraded"], "coupang_api_status_429")
+
     def test_assist_does_not_shorten_invalid_recommendation_targets(self):
         class InvalidUrlAdapter(FakeAdapter):
             def search_products(self, **params):
