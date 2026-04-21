@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
 
 from analytics import AnalyticsStore, build_analytics_store_from_env
-from client import CoupangPartnersClient
+from client import CoupangApiError, CoupangPartnersClient
 from economics import build_economics_summary
 from recommendation import (
     build_assist_response,
@@ -76,10 +76,21 @@ class ShoppingBackend:
             raise BackendError(HTTPStatus.BAD_REQUEST, "'query' is required")
         evidence_snippets = _normalize_evidence_snippets(payload.get("evidence_snippets") or [])
         search_plan = build_search_queries(normalized)
-        products = self._search_products(
-            query=query,
-            search_plan=search_plan,
-        )
+        degraded_reason: Optional[str] = None
+        try:
+            products = self._search_products(
+                query=query,
+                search_plan=search_plan,
+            )
+        except CoupangApiError as exc:
+            products = []
+            degraded_reason = f"coupang_api_status_{exc.status_code}"
+            log_event(
+                "coupang_search_degraded",
+                query=query,
+                status_code=exc.status_code,
+                reason=str(exc)[:200],
+            )
         recommendations = recommend_products(
             query=query,
             products=_filter_products(
@@ -106,12 +117,15 @@ class ShoppingBackend:
             )
         except Exception as exc:
             log_event("analytics_error", stage="record_assist", query=query, error=str(exc))
-        return build_assist_response(
+        response = build_assist_response(
             normalized=normalized,
             search_plan=search_plan,
             recommendations=recommendations,
             query_id=query_id,
         )
+        if degraded_reason:
+            response["degraded"] = degraded_reason
+        return response
 
     def deeplinks(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         urls = payload.get("urls") or payload.get("coupangUrls") or []
