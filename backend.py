@@ -522,19 +522,49 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def _extract_products(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    if not payload:
+    def _walk(node: Any) -> List[Dict[str, Any]]:
+        if not node:
+            return []
+        if isinstance(node, list):
+            direct_products = [item for item in node if isinstance(item, dict) and (item.get("productId") or item.get("productName") or item.get("productUrl"))]
+            if direct_products:
+                return direct_products
+            flattened: List[Dict[str, Any]] = []
+            for item in node:
+                if not isinstance(item, dict):
+                    continue
+                parent_category_id = item.get("categoryId")
+                for wrapper_key in ("item", "product", "productItem"):
+                    wrapped = item.get(wrapper_key)
+                    if isinstance(wrapped, dict) and (wrapped.get("productId") or wrapped.get("productName") or wrapped.get("productUrl")):
+                        if parent_category_id is not None and "categoryId" not in wrapped:
+                            wrapped = {**wrapped, "categoryId": parent_category_id}
+                        flattened.append(wrapped)
+                for nested_key in ("products", "productData", "items"):
+                    nested = item.get(nested_key)
+                    nested_products = _walk(nested)
+                    if nested_products:
+                        if parent_category_id is not None:
+                            nested_products = [
+                                ({**product, "categoryId": parent_category_id} if isinstance(product, dict) and "categoryId" not in product else product)
+                                for product in nested_products
+                            ]
+                        flattened.extend(nested_products)
+            return flattened
+        if isinstance(node, dict):
+            for key in ("products", "productData", "items"):
+                nested = node.get(key)
+                nested_products = _walk(nested)
+                if nested_products:
+                    return nested_products
+            for key in ("data", "bestCategories", "goldbox", "result", "payload"):
+                nested = node.get(key)
+                nested_products = _walk(nested)
+                if nested_products:
+                    return nested_products
         return []
-    if isinstance(payload, list):
-        return payload
-    data = payload.get("data") if isinstance(payload, dict) else None
-    if isinstance(data, dict):
-        for key in ("products", "productData", "items"):
-            if isinstance(data.get(key), list):
-                return data[key]
-    for key in ("products", "productData", "items"):
-        if isinstance(payload.get(key), list):
-            return payload[key]
-    return []
+
+    return _walk(payload)
 
 
 def _parse_category_id(query_params: Dict[str, List[str]], default: int = 1016) -> int:

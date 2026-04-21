@@ -5,7 +5,7 @@ import unittest
 from urllib import error, request
 
 from analytics import AnalyticsStore
-from backend import _Handler, ShoppingBackend, build_server, serve_in_thread
+from backend import _Handler, ShoppingBackend, _extract_products, build_server, serve_in_thread
 from security import RateLimiter
 
 
@@ -41,40 +41,17 @@ class FakeAdapter:
     def deeplink(self, urls):
         return {"data": [{"originalUrl": url} for url in urls]}
 
-    def get_bestcategories(self, category_id):
-        return {
-            "data": [
-                {
-                    "categoryId": int(category_id),
-                    "productId": 101,
-                    "productName": "카테고리 베스트 상품",
-                    "productPrice": 19900,
-                    "productUrl": "https://www.coupang.com/vp/products/101",
-                }
-            ]
-        }
-
-    def get_goldbox(self):
-        return {
-            "data": [
-                {
-                    "productId": 99,
-                    "productName": "골드박스 상품",
-                    "productPrice": 9900,
-                    "productUrl": "https://www.coupang.com/vp/products/99",
-                }
-            ]
-        }
-
     def get_goldbox(self):
         return {
             "data": {
-                "productData": [
+                "products": [
                     {
-                        "productId": 101,
-                        "productName": "오늘의 골드박스",
-                        "productPrice": 19900,
-                        "productUrl": "https://www.coupang.com/vp/products/101",
+                        "item": {
+                            "productId": 101,
+                            "productName": "오늘의 골드박스",
+                            "productPrice": 19900,
+                            "productUrl": "https://www.coupang.com/vp/products/101",
+                        }
                     }
                 ]
             }
@@ -83,13 +60,17 @@ class FakeAdapter:
     def get_bestcategories(self, category_id):
         return {
             "data": {
-                "productData": [
+                "bestCategories": [
                     {
-                        "productId": 201,
                         "categoryId": int(category_id),
-                        "productName": "카테고리 베스트 상품",
-                        "productPrice": 29900,
-                        "productUrl": "https://www.coupang.com/vp/products/201",
+                        "products": [
+                            {
+                                "productId": 201,
+                                "productName": "카테고리 베스트 상품",
+                                "productPrice": 29900,
+                                "productUrl": "https://www.coupang.com/vp/products/201",
+                            }
+                        ],
                     }
                 ]
             }
@@ -557,6 +538,65 @@ class BackendTests(unittest.TestCase):
             request.urlopen(request_obj, timeout=5)
         self.assertEqual(ctx.exception.code, 404)
         ctx.exception.close()
+
+
+class ExtractProductsTests(unittest.TestCase):
+    """Unit tests for _extract_products covering all known Coupang response shapes."""
+
+    def test_none_returns_empty(self):
+        self.assertEqual(_extract_products(None), [])
+
+    def test_empty_dict_returns_empty(self):
+        self.assertEqual(_extract_products({}), [])
+
+    def test_plain_list_returns_as_is(self):
+        items = [{"productId": 1}, {"productId": 2}]
+        self.assertEqual(_extract_products(items), items)
+
+    def test_data_is_list(self):
+        """Coupang goldbox/bestcategories often return {"data": [...]}."""
+        items = [{"productId": 1, "productName": "A"}]
+        self.assertEqual(_extract_products({"data": items}), items)
+
+    def test_data_dict_with_productData(self):
+        """search_products returns {"data": {"productData": [...]}}."""
+        items = [{"productId": 1}]
+        self.assertEqual(_extract_products({"data": {"productData": items}}), items)
+
+    def test_data_dict_with_products(self):
+        items = [{"productId": 1}]
+        self.assertEqual(_extract_products({"data": {"products": items}}), items)
+
+    def test_data_dict_with_items(self):
+        items = [{"productId": 1}]
+        self.assertEqual(_extract_products({"data": {"items": items}}), items)
+
+    def test_top_level_products_key(self):
+        items = [{"productId": 1}]
+        self.assertEqual(_extract_products({"products": items}), items)
+
+    def test_top_level_productData_key(self):
+        items = [{"productId": 1}]
+        self.assertEqual(_extract_products({"productData": items}), items)
+
+    def test_top_level_items_key(self):
+        items = [{"productId": 1}]
+        self.assertEqual(_extract_products({"items": items}), items)
+
+    def test_data_is_empty_list(self):
+        self.assertEqual(_extract_products({"data": []}), [])
+
+    def test_envelope_with_rCode_and_data_list(self):
+        """Full Coupang envelope: {"rCode": "0", "rMessage": "", "data": [...]}."""
+        items = [{"productId": 99, "productName": "골드박스"}]
+        payload = {"rCode": "0", "rMessage": "", "data": items}
+        self.assertEqual(_extract_products(payload), items)
+
+    def test_data_is_non_list_non_dict_returns_empty(self):
+        self.assertEqual(_extract_products({"data": "unexpected"}), [])
+
+    def test_no_recognized_keys_returns_empty(self):
+        self.assertEqual(_extract_products({"foo": "bar"}), [])
 
 
 if __name__ == "__main__":
