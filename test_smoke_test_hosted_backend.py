@@ -25,6 +25,18 @@ class FakeAdapter:
             }
         }
 
+    def get_goldbox(self):
+        return {"data": {"productData": [{"productId": 777, "productName": "골드박스 테스트 상품"}]}}
+
+    def get_bestcategories(self, category_id):
+        return {
+            "data": {
+                "productData": [
+                    {"productId": 888, "categoryId": int(category_id), "productName": "베스트 테스트 상품"}
+                ]
+            }
+        }
+
 
 def load_smoke_module():
     script_path = Path(__file__).resolve().parent / "scripts" / "smoke_test_hosted_backend.py"
@@ -74,7 +86,10 @@ class SmokeTestHostedBackendTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertFalse(result["auth_checked"])
-        self.assertEqual([check["name"] for check in result["checks"]], ["health", "public_assist"])
+        self.assertEqual(
+            [check["name"] for check in result["checks"]],
+            ["health", "public_assist", "public_goldbox", "public_best_products"],
+        )
 
     def test_smoke_test_runs_authenticated_checks(self):
         with mock.patch.object(self.module, "_normalize_base_url", return_value=self.base_url):
@@ -89,7 +104,10 @@ class SmokeTestHostedBackendTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["auth_checked"])
-        self.assertEqual([check["name"] for check in result["checks"]], ["health", "public_assist", "admin_summary"])
+        self.assertEqual(
+            [check["name"] for check in result["checks"]],
+            ["health", "public_assist", "public_goldbox", "public_best_products", "admin_summary"],
+        )
 
 
 if __name__ == "__main__":

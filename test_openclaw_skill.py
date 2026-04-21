@@ -36,6 +36,33 @@ class CableAdapter:
             }
         }
 
+    def get_goldbox(self):
+        return {
+            "data": {
+                "productData": [
+                    {
+                        "productId": 901,
+                        "productName": "골드박스 AUX 특가",
+                        "productUrl": "https://www.coupang.com/vp/products/901",
+                    }
+                ]
+            }
+        }
+
+    def get_bestcategories(self, category_id):
+        return {
+            "data": {
+                "productData": [
+                    {
+                        "productId": 902,
+                        "categoryId": int(category_id),
+                        "productName": "베스트 AUX 상품",
+                        "productUrl": "https://www.coupang.com/vp/products/902",
+                    }
+                ]
+            }
+        }
+
 
 class OpenClawSkillTests(unittest.TestCase):
     def _load_script_globals(self):
@@ -159,6 +186,47 @@ class OpenClawSkillTests(unittest.TestCase):
                 script_globals["_normalize_backend_base_url"]("http://127.0.0.1:9883"),
                 "http://127.0.0.1:9883",
             )
+
+    def test_skill_script_fetches_goldbox_from_public_hosted_path(self):
+        env = dict(os.environ)
+        env["OPENCLAW_SHOPPING_BASE_URL"] = self.base_url
+        env["OPENCLAW_SHOPPING_ALLOW_NON_PROD_BACKEND"] = "true"
+        completed = subprocess.run(
+            [sys.executable, "openclaw_skill/scripts/openclaw-shopping-skill.py", "goldbox"],
+            cwd=os.getcwd(),
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        payload = json.loads(completed.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["data"]["products"][0]["productId"], 901)
+
+    def test_skill_script_fetches_best_products_from_public_hosted_path(self):
+        env = dict(os.environ)
+        env["OPENCLAW_SHOPPING_BASE_URL"] = self.base_url
+        env["OPENCLAW_SHOPPING_ALLOW_NON_PROD_BACKEND"] = "true"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "openclaw_skill/scripts/openclaw-shopping-skill.py",
+                "best-products",
+                "--category-id",
+                "1039",
+            ],
+            cwd=os.getcwd(),
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        payload = json.loads(completed.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["data"]["category_id"], 1039)
+        self.assertEqual(payload["data"]["products"][0]["categoryId"], 1039)
 
 
 if __name__ == "__main__":

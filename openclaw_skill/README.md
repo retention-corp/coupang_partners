@@ -35,6 +35,13 @@ python3 scripts/openclaw-shopping-skill.py recommend \
 The `recommend` command posts to `/v1/public/assist` on the hosted backend by default.
 Closed beta traffic should always resolve to the hosted production URL.
 
+The `goldbox` and `best-products` commands call hosted public GET endpoints, so public clients stay credentialless while the hosted backend keeps Coupang keys server-side.
+
+```bash
+python3 scripts/openclaw-shopping-skill.py goldbox --backend https://a.retn.kr
+python3 scripts/openclaw-shopping-skill.py best-products --backend https://a.retn.kr --category-id 1016
+```
+
 The `deeplinks` command is operator-only and uses internal routes. Public recommendation responses already include action-ready links.
 
 ## Local development override

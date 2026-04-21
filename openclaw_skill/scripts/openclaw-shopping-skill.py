@@ -8,6 +8,8 @@ from urllib.error import HTTPError, URLError
 
 DEFAULT_HOSTED_BACKEND = "https://a.retn.kr"
 DEFAULT_ASSIST_PATH = "/v1/public/assist"
+DEFAULT_GOLDBOX_PATH = "/v1/public/goldbox"
+DEFAULT_BEST_PRODUCTS_PATH = "/v1/public/best-products"
 DEFAULT_INTERNAL_ASSIST_PATH = "/internal/v1/assist"
 DEFAULT_INTERNAL_DEEPLINK_PATH = "/internal/v1/deeplinks"
 
@@ -102,10 +104,31 @@ def _request_json(url: str, payload):
         return json.loads(response.read().decode("utf-8"))
 
 
+def _get_json(url: str):
+    headers = {"X-OpenClaw-Client-Id": os.getenv("OPENCLAW_SHOPPING_CLIENT_ID", "openclaw-skill")}
+    auth_token = _auth_token()
+    if auth_token and _use_internal_api():
+        headers["Authorization"] = f"Bearer {auth_token}"
+    req = request.Request(url, headers=headers, method="GET")
+    with request.urlopen(req, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 def _post_json(url: str, payload):
     _validate_backend_url(url)
     try:
         return _request_json(url, payload)
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8") or exc.reason
+        raise RuntimeError(f"backend returned HTTP {exc.code}: {detail}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"backend request failed: {exc.reason}") from exc
+
+
+def _fetch_json(url: str):
+    _validate_backend_url(url)
+    try:
+        return _get_json(url)
     except HTTPError as exc:
         detail = exc.read().decode("utf-8") or exc.reason
         raise RuntimeError(f"backend returned HTTP {exc.code}: {detail}") from exc
@@ -124,6 +147,13 @@ def main() -> int:
     recommend.add_argument("--limit", type=int, default=5)
     recommend.add_argument("--include-term", action="append", default=[])
     recommend.add_argument("--exclude-term", action="append", default=[])
+
+    goldbox = subparsers.add_parser("goldbox")
+    goldbox.add_argument("--backend", default=_backend_base_url())
+
+    best_products = subparsers.add_parser("best-products")
+    best_products.add_argument("--backend", default=_backend_base_url())
+    best_products.add_argument("--category-id", type=int, default=1016)
 
     deeplinks = subparsers.add_parser("deeplinks")
     deeplinks.add_argument("--backend", default=_backend_base_url())
@@ -146,6 +176,10 @@ def main() -> int:
             }
             assist_path = DEFAULT_INTERNAL_ASSIST_PATH if _use_internal_api() else DEFAULT_ASSIST_PATH
             result = _post_json(backend_base_url + assist_path, payload)
+        elif args.command == "goldbox":
+            result = _fetch_json(backend_base_url + DEFAULT_GOLDBOX_PATH)
+        elif args.command == "best-products":
+            result = _fetch_json(backend_base_url + f"{DEFAULT_BEST_PRODUCTS_PATH}?categoryId={args.category_id}")
         else:
             deeplink_path = DEFAULT_INTERNAL_DEEPLINK_PATH
             result = _post_json(backend_base_url + deeplink_path, {"urls": args.url})

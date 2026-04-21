@@ -41,6 +41,60 @@ class FakeAdapter:
     def deeplink(self, urls):
         return {"data": [{"originalUrl": url} for url in urls]}
 
+    def get_bestcategories(self, category_id):
+        return {
+            "data": [
+                {
+                    "categoryId": int(category_id),
+                    "productId": 101,
+                    "productName": "카테고리 베스트 상품",
+                    "productPrice": 19900,
+                    "productUrl": "https://www.coupang.com/vp/products/101",
+                }
+            ]
+        }
+
+    def get_goldbox(self):
+        return {
+            "data": [
+                {
+                    "productId": 99,
+                    "productName": "골드박스 상품",
+                    "productPrice": 9900,
+                    "productUrl": "https://www.coupang.com/vp/products/99",
+                }
+            ]
+        }
+
+    def get_goldbox(self):
+        return {
+            "data": {
+                "productData": [
+                    {
+                        "productId": 101,
+                        "productName": "오늘의 골드박스",
+                        "productPrice": 19900,
+                        "productUrl": "https://www.coupang.com/vp/products/101",
+                    }
+                ]
+            }
+        }
+
+    def get_bestcategories(self, category_id):
+        return {
+            "data": {
+                "productData": [
+                    {
+                        "productId": 201,
+                        "categoryId": int(category_id),
+                        "productName": "카테고리 베스트 상품",
+                        "productPrice": 29900,
+                        "productUrl": "https://www.coupang.com/vp/products/201",
+                    }
+                ]
+            }
+        }
+
 
 class CableAdapter:
     def search_products(self, **params):
@@ -185,6 +239,25 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(response.code, 302)
         self.assertEqual(response.headers["Location"], "https://www.coupang.com/vp/products/1")
         response.close()
+
+    def test_public_goldbox_is_credentialless(self):
+        response = json.loads(request.urlopen(f"{self.base_url}/v1/public/goldbox", timeout=5).read().decode("utf-8"))
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["count"], 1)
+        self.assertEqual(response["products"][0]["productId"], 101)
+        self.assertTrue(response["products"][0]["short_url"].startswith("https://go.example.com/s/"))
+
+    def test_public_best_products_is_credentialless(self):
+        response = json.loads(
+            request.urlopen(f"{self.base_url}/v1/public/best-products?categoryId=1039", timeout=5).read().decode("utf-8")
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["category_id"], 1039)
+        self.assertEqual(response["count"], 1)
+        self.assertEqual(response["products"][0]["categoryId"], 1039)
+        self.assertTrue(response["products"][0]["short_url"].startswith("https://go.example.com/s/"))
 
     def test_assist_requires_bearer_token_when_configured(self):
         os.environ["OPENCLAW_SHOPPING_API_TOKENS"] = "token-123"
@@ -442,6 +515,35 @@ class BackendTests(unittest.TestCase):
         )
         response = json.loads(request.urlopen(request_obj, timeout=5).read().decode("utf-8"))
         self.assertEqual(response["best_fit"]["product_id"], "1")
+
+    def test_public_best_products_is_tokenless_and_shortens_links(self):
+        os.environ["OPENCLAW_SHOPPING_API_TOKENS"] = "token-123"
+
+        response = json.loads(
+            request.urlopen(f"{self.base_url}/v1/public/best-products?categoryId=1001", timeout=5).read().decode("utf-8")
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["category_id"], 1001)
+        self.assertEqual(response["count"], 1)
+        self.assertEqual(response["products"][0]["categoryId"], 1001)
+        self.assertTrue(response["products"][0]["short_url"].startswith("https://go.example.com/s/"))
+
+    def test_internal_best_products_requires_bearer_token(self):
+        os.environ["OPENCLAW_SHOPPING_API_TOKENS"] = "token-123"
+
+        with self.assertRaises(error.HTTPError) as ctx:
+            request.urlopen(f"{self.base_url}/internal/v1/best-products?categoryId=1001", timeout=5)
+
+        self.assertEqual(ctx.exception.code, 401)
+        ctx.exception.close()
+
+    def test_best_products_rejects_non_integer_category_id(self):
+        with self.assertRaises(error.HTTPError) as ctx:
+            request.urlopen(f"{self.base_url}/v1/public/best-products?categoryId=abc", timeout=5)
+
+        self.assertEqual(ctx.exception.code, 400)
+        ctx.exception.close()
 
     def test_operator_routes_can_be_disabled(self):
         os.environ["OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES"] = "false"

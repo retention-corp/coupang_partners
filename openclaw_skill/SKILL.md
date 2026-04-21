@@ -61,6 +61,21 @@ python3 {baseDir}/scripts/openclaw-shopping-skill.py deeplinks \
   --url https://www.coupang.com/vp/products/123
 ```
 
+### 3) View goldbox deals
+
+```bash
+python3 {baseDir}/scripts/openclaw-shopping-skill.py goldbox \
+  --backend https://a.retn.kr
+```
+
+### 4) View category best products
+
+```bash
+python3 {baseDir}/scripts/openclaw-shopping-skill.py best-products \
+  --backend https://a.retn.kr \
+  --category-id 1016
+```
+
 ## Suggested agent workflow
 
 1. Ask for the user’s actual shopping constraints.
@@ -83,3 +98,5 @@ The hosted backend should support:
 
 - `POST /v1/public/assist`
 - `GET /health`
+- `GET /v1/public/goldbox`
+- `GET /v1/public/best-products?categoryId=...`

@@ -88,6 +88,33 @@ def smoke_test(base_url: str, *, timeout: int, token: Optional[str], require_aut
         }
     )
 
+    goldbox_payload = _request_json("GET", normalized_base_url + "/v1/public/goldbox", timeout=timeout)
+    if not goldbox_payload.get("ok"):
+        raise SmokeTestError("public goldbox smoke test did not return ok=true")
+    checks.append(
+        {
+            "name": "public_goldbox",
+            "request_id": goldbox_payload.get("requestId"),
+            "count": goldbox_payload.get("count", 0),
+        }
+    )
+
+    best_products_payload = _request_json(
+        "GET",
+        normalized_base_url + "/v1/public/best-products?categoryId=1016",
+        timeout=timeout,
+    )
+    if not best_products_payload.get("ok"):
+        raise SmokeTestError("public best-products smoke test did not return ok=true")
+    checks.append(
+        {
+            "name": "public_best_products",
+            "request_id": best_products_payload.get("requestId"),
+            "count": best_products_payload.get("count", 0),
+            "category_id": best_products_payload.get("category_id"),
+        }
+    )
+
     if not token:
         if require_auth:
             raise SmokeTestError("authenticated smoke test requested but no OPENCLAW_SHOPPING_API_TOKEN(S) available")

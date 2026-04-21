@@ -4,6 +4,7 @@ import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
+from urllib import parse
 
 from analytics import AnalyticsStore, build_analytics_store_from_env
 from client import CoupangApiError, CoupangPartnersClient
@@ -151,6 +152,54 @@ class ShoppingBackend:
         )
         return {"ok": True, "event_id": event_id}
 
+    def goldbox(self) -> Dict[str, Any]:
+        if not hasattr(self.adapter, "get_goldbox"):
+            raise BackendError(HTTPStatus.NOT_IMPLEMENTED, "Adapter does not support get_goldbox().")
+        try:
+            raw = self.adapter.get_goldbox()
+        except Exception as exc:
+            log_event("goldbox_error", error=str(exc))
+            raise BackendError(HTTPStatus.BAD_GATEWAY, "Upstream goldbox request failed") from exc
+        products = _extract_products(raw)
+        products = self._attach_short_links_to_product_list(products)
+        try:
+            self.analytics_store.record_event(event_type="goldbox_viewed")
+        except Exception as exc:
+            log_event("analytics_error", stage="goldbox_viewed", error=str(exc))
+        return {"ok": True, "products": products, "count": len(products)}
+
+    def best_products(self, category_id: int = 1016) -> Dict[str, Any]:
+        if not hasattr(self.adapter, "get_bestcategories"):
+            raise BackendError(HTTPStatus.NOT_IMPLEMENTED, "Adapter does not support get_bestcategories().")
+        try:
+            raw = self.adapter.get_bestcategories(category_id)
+        except Exception as exc:
+            log_event("best_products_error", error=str(exc), category_id=category_id)
+            raise BackendError(HTTPStatus.BAD_GATEWAY, "Upstream best-products request failed") from exc
+        products = _extract_products(raw)
+        products = self._attach_short_links_to_product_list(products)
+        try:
+            self.analytics_store.record_event(event_type="best_products_viewed", metadata={"category_id": category_id})
+        except Exception as exc:
+            log_event("analytics_error", stage="best_products_viewed", error=str(exc), category_id=category_id)
+        return {"ok": True, "category_id": category_id, "products": products, "count": len(products)}
+
+    def metrics(self) -> Dict[str, Any]:
+        summary = self.analytics_store.get_summary()
+        adapter_name = type(self.adapter).__name__
+        shortener_name = type(self.shortener).__name__ if self.shortener else "none"
+        return {
+            "ok": True,
+            "adapter": adapter_name,
+            "shortener": shortener_name,
+            "counts": {
+                "total_queries": summary.get("total_queries", 0),
+                "total_recommendations": summary.get("total_recommendations", 0),
+                "total_events": summary.get("total_events", 0),
+            },
+            "event_breakdown": summary.get("event_breakdown", []),
+        }
+
     def summary(self) -> Dict[str, Any]:
         summary = self.analytics_store.get_summary()
         try:
@@ -220,6 +269,21 @@ class ShoppingBackend:
             )
         return enriched
 
+    def _attach_short_links_to_product_list(self, products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not self.shortener:
+            return products
+        enriched: List[Dict[str, Any]] = []
+        for product in products:
+            original = product.get("productUrl") or product.get("url") or ""
+            shortened = original
+            if original and validate_deeplink_url(original, self.allowed_deeplink_hosts):
+                try:
+                    shortened = self.shortener.shorten(original)
+                except Exception as exc:
+                    log_event("shortener_error", stage="shorten_product_list", error=str(exc))
+            enriched.append({**product, "short_url": shortened})
+        return enriched
+
     def _attach_short_links_to_deeplink_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
         if not self.shortener:
             return response
@@ -264,6 +328,9 @@ class _Handler(BaseHTTPRequestHandler):
         request_id = generate_request_id()
         remote_addr = normalize_client_ip(self.client_address[0] if self.client_address else None)
         try:
+            parsed_path = parse.urlsplit(self.path)
+            path = parsed_path.path
+            query_params = parse.parse_qs(parsed_path.query)
             if self.path.startswith("/s/"):
                 slug = self.path.split("/s/", 1)[1].split("?", 1)[0].strip()
                 target = self.backend.resolve_short_link(slug)
@@ -277,15 +344,54 @@ class _Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 log_event("shortlink_redirect", request_id=request_id, slug=slug, remote_addr=remote_addr)
                 return
-            if self.path in ("/health", "/healthz"):
+            if path in ("/health", "/healthz"):
                 self._send_json(HTTPStatus.OK, {**self.backend.health(), "requestId": request_id}, head_only=head_only)
                 return
-            if self.path == "/v1/admin/summary":
+            if path == "/v1/admin/summary":
                 if not _operator_routes_enabled():
                     self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id}, head_only=head_only)
                     return
                 self._authorize_internal(request_id=request_id, remote_addr=remote_addr)
                 self._send_json(HTTPStatus.OK, {**self.backend.summary(), "requestId": request_id}, head_only=head_only)
+                return
+            if path == "/v1/admin/metrics":
+                if not _operator_routes_enabled():
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id}, head_only=head_only)
+                    return
+                self._authorize_internal(request_id=request_id, remote_addr=remote_addr)
+                self._send_json(HTTPStatus.OK, {**self.backend.metrics(), "requestId": request_id}, head_only=head_only)
+                return
+            if path == "/v1/public/goldbox":
+                self._authorize_public(request_id=request_id, remote_addr=remote_addr)
+                response = self.backend.goldbox()
+                log_event("goldbox_ok", request_id=request_id, path=self.path, remote_addr=remote_addr)
+                self._send_json(HTTPStatus.OK, {**response, "requestId": request_id}, head_only=head_only)
+                return
+            if path in ("/v1/goldbox", "/internal/v1/goldbox"):
+                if not _operator_routes_enabled():
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id}, head_only=head_only)
+                    return
+                self._authorize_internal(request_id=request_id, remote_addr=remote_addr)
+                response = self.backend.goldbox()
+                log_event("goldbox_ok", request_id=request_id, path=self.path, remote_addr=remote_addr)
+                self._send_json(HTTPStatus.OK, {**response, "requestId": request_id}, head_only=head_only)
+                return
+            if path == "/v1/public/best-products":
+                self._authorize_public(request_id=request_id, remote_addr=remote_addr)
+                category_id = _parse_category_id(query_params)
+                response = self.backend.best_products(category_id)
+                log_event("best_products_ok", request_id=request_id, path=self.path, remote_addr=remote_addr, category_id=category_id)
+                self._send_json(HTTPStatus.OK, {**response, "requestId": request_id}, head_only=head_only)
+                return
+            if path in ("/v1/best-products", "/internal/v1/best-products"):
+                if not _operator_routes_enabled():
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id}, head_only=head_only)
+                    return
+                self._authorize_internal(request_id=request_id, remote_addr=remote_addr)
+                category_id = _parse_category_id(query_params)
+                response = self.backend.best_products(category_id)
+                log_event("best_products_ok", request_id=request_id, path=self.path, remote_addr=remote_addr, category_id=category_id)
+                self._send_json(HTTPStatus.OK, {**response, "requestId": request_id}, head_only=head_only)
                 return
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id}, head_only=head_only)
         except BackendError as exc:
@@ -406,7 +512,7 @@ class _Handler(BaseHTTPRequestHandler):
         return client_marker
 
     def _pick_rate_limiter(self, *, token: Optional[str], internal: bool):
-        if self.path == "/v1/admin/summary":
+        if self.path in ("/v1/admin/summary", "/v1/admin/metrics"):
             return self.admin_rate_limiter or self.rate_limiter
         if not internal:
             return self.public_rate_limiter or self.rate_limiter
@@ -429,6 +535,16 @@ def _extract_products(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         if isinstance(payload.get(key), list):
             return payload[key]
     return []
+
+
+def _parse_category_id(query_params: Dict[str, List[str]], default: int = 1016) -> int:
+    raw = query_params.get("categoryId") or query_params.get("category_id") or []
+    if not raw:
+        return default
+    try:
+        return int(raw[0])
+    except (TypeError, ValueError) as exc:
+        raise BackendError(HTTPStatus.BAD_REQUEST, "categoryId must be an integer") from exc
 
 
 def _filter_products(products: List[Dict[str, Any]], avoid_terms: List[str], include_terms: Optional[List[str]] = None) -> List[Dict[str, Any]]:
