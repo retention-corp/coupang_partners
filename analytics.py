@@ -74,6 +74,39 @@ class AnalyticsStore:
                 "ON queries (client_id, created_at DESC)"
             )
 
+            # Surface-origin attribution columns (spec acquihire-sprint-1mo D9/R3.1).
+            # Added here so every event row can be filtered by surface/client later. Columns
+            # use ALTER TABLE (not CREATE TABLE) to stay backwards-compatible with sqlite DBs
+            # that predate this migration.
+            event_cols = {row[1] for row in connection.execute("PRAGMA table_info(events)").fetchall()}
+            for column in ("surface", "surface_raw", "client_id", "client_version", "utm_source"):
+                if column not in event_cols:
+                    connection.execute(f"ALTER TABLE events ADD COLUMN {column} TEXT")
+            # Shortlink attribution columns (spec acquihire-sprint-1mo R3.5/R3.6/T5 part 2).
+            # Separate from the attribution columns above so effective_click dedup
+            # (R3.7) can group on real client_ip without clobbering the stable client_id
+            # bucket. Re-read event_cols after the first ALTER batch so repeated migrations
+            # are still idempotent when only a subset was applied before.
+            event_cols = {row[1] for row in connection.execute("PRAGMA table_info(events)").fetchall()}
+            for column in ("client_ip", "user_agent", "proxy_ip"):
+                if column not in event_cols:
+                    connection.execute(f"ALTER TABLE events ADD COLUMN {column} TEXT")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_events_surface_created_at "
+                "ON events (surface, created_at DESC)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_events_client_id_created_at "
+                "ON events (client_id, created_at DESC)"
+            )
+            # Composite index drives the (client_ip, slug) dedup scan used by
+            # economics.compute_effective_clicks — without it each weekly batch
+            # would re-sort the full events table.
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_events_type_client_ip_created_at "
+                "ON events (event_type, client_ip, created_at)"
+            )
+
     def record_assist(
         self,
         *,
@@ -133,11 +166,23 @@ class AnalyticsStore:
         query_id: Optional[str] = None,
         recommendation_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        surface: Optional[str] = None,
+        surface_raw: Optional[str] = None,
+        client_id: Optional[str] = None,
+        client_version: Optional[str] = None,
+        utm_source: Optional[str] = None,
+        client_ip: Optional[str] = None,
+        user_agent: Optional[str] = None,
+        proxy_ip: Optional[str] = None,
     ) -> str:
         event_id = str(uuid.uuid4())
         with sqlite3.connect(self.db_path) as connection:
             connection.execute(
-                "INSERT INTO events (id, query_id, recommendation_id, event_type, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO events ("
+                "id, query_id, recommendation_id, event_type, metadata_json, created_at, "
+                "surface, surface_raw, client_id, client_version, utm_source, "
+                "client_ip, user_agent, proxy_ip"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     event_id,
                     query_id,
@@ -145,6 +190,14 @@ class AnalyticsStore:
                     event_type,
                     json.dumps(metadata or {}, ensure_ascii=False),
                     _utc_now(),
+                    surface,
+                    surface_raw,
+                    client_id,
+                    client_version,
+                    utm_source,
+                    client_ip,
+                    user_agent,
+                    proxy_ip,
                 ),
             )
         return event_id
@@ -316,18 +369,38 @@ class FirestoreAnalyticsStore:
         query_id: Optional[str] = None,
         recommendation_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        surface: Optional[str] = None,
+        surface_raw: Optional[str] = None,
+        client_id: Optional[str] = None,
+        client_version: Optional[str] = None,
+        utm_source: Optional[str] = None,
+        client_ip: Optional[str] = None,
+        user_agent: Optional[str] = None,
+        proxy_ip: Optional[str] = None,
     ) -> str:
         event_id = str(uuid.uuid4())
+        # Firestore fields default to empty strings rather than null so downstream
+        # aggregations (gap_ratio reconciliation, proxy-GMV weekly rollups) can
+        # `orderBy` + filter without per-field presence checks.
+        fields: Dict[str, Dict[str, Any]] = {
+            "event_type": {"stringValue": event_type},
+            "metadata_json": {"stringValue": json.dumps(metadata or {}, ensure_ascii=False)},
+            "created_at": {"timestampValue": _utc_now()},
+            "client_ip": {"stringValue": client_ip or ""},
+            "user_agent": {"stringValue": user_agent or ""},
+            "proxy_ip": {"stringValue": proxy_ip or ""},
+            **_optional_string_field("query_id", query_id),
+            **_optional_string_field("recommendation_id", recommendation_id),
+            **_optional_string_field("surface", surface),
+            **_optional_string_field("surface_raw", surface_raw),
+            **_optional_string_field("client_id", client_id),
+            **_optional_string_field("client_version", client_version),
+            **_optional_string_field("utm_source", utm_source),
+        }
         self._create_document(
             self.collections["events"],
             event_id,
-            {
-                "event_type": {"stringValue": event_type},
-                "metadata_json": {"stringValue": json.dumps(metadata or {}, ensure_ascii=False)},
-                "created_at": {"timestampValue": _utc_now()},
-                **_optional_string_field("query_id", query_id),
-                **_optional_string_field("recommendation_id", recommendation_id),
-            },
+            fields,
         )
         return event_id
 

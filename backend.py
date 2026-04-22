@@ -11,7 +11,11 @@ from urllib.parse import parse_qs, urlsplit
 
 from analytics import AnalyticsStore, build_analytics_store_from_env
 from client import CoupangApiError, CoupangPartnersClient
-from economics import build_economics_summary
+from economics import (
+    build_economics_summary,
+    read_click_reconciliation_row,
+    read_proxy_gmv_rows,
+)
 from recommendation import (
     DISCLOSURE_TEXT,
     _coerce_int as _coerce_int_value,
@@ -91,6 +95,38 @@ def _normalize_surface(raw_value: Optional[str]) -> Tuple[str, Optional[str]]:
     if first_seen:
         log_event("surface_enum_unknown", surface_raw=trimmed[:64])
     return "unknown", trimmed[:128]
+
+
+def _query_param(query: str, name: str) -> Optional[str]:
+    """Return the first value for `name` in a raw query string, or None.
+
+    Thin wrapper around parse_qs so admin-route handlers don't each re-implement
+    "parse one string param" — returning None keeps the "omitted" branch
+    explicit at the call site (admin endpoints use it to mean 'latest').
+    """
+
+    if not query:
+        return None
+    values = parse_qs(query, keep_blank_values=False).get(name) or []
+    if not values:
+        return None
+    first = (values[0] or "").strip()
+    return first or None
+
+
+def _first_forwarded_for(header_value: Optional[str]) -> Optional[str]:
+    """Return the first IP from an `X-Forwarded-For` header, or None if absent.
+
+    XFF is a comma-separated chain of `client, proxy1, proxy2, ...`. Cloud Run's
+    front-end proxy terminates TCP, so `self.client_address` is always a link-local
+    169.254.x.x peer — the first XFF entry is the real caller. We do not validate the
+    IP shape here: normalize_client_ip downstream will coerce garbage into "unknown".
+    """
+
+    if not header_value:
+        return None
+    first = header_value.split(",", 1)[0].strip()
+    return first or None
 
 
 def _attribution_kwargs(attribution: Optional[Dict[str, Optional[str]]]) -> Dict[str, Optional[str]]:
@@ -872,6 +908,36 @@ class ShoppingBackend:
         summary["economics"] = build_economics_summary(summary)
         return summary
 
+    def proxy_gmv_rows(self, *, week_start: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return weekly proxy-GMV rows written by economics.compute_weekly_proxy_gmv.
+
+        Reads the sqlite DB directly because the weekly batch is an out-of-process
+        job — the admin endpoint is decoupled from the writer, so we never want to
+        hold a shared connection. Returns an empty list when analytics is backed by
+        a non-sqlite provider (e.g., Firestore) so the endpoint still 200s on prod.
+        """
+
+        db_path = getattr(self.analytics_store, "db_path", None)
+        if not db_path:
+            return []
+        try:
+            return read_proxy_gmv_rows(db_path, week_start=week_start)
+        except Exception as exc:
+            log_event("proxy_gmv_read_error", error=str(exc))
+            return []
+
+    def click_reconciliation_row(self, *, date_kst: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Return a single click_reconciliation row (latest if `date_kst` is None)."""
+
+        db_path = getattr(self.analytics_store, "db_path", None)
+        if not db_path:
+            return None
+        try:
+            return read_click_reconciliation_row(db_path, date_kst=date_kst)
+        except Exception as exc:
+            log_event("click_reconciliation_read_error", error=str(exc))
+            return None
+
     def resolve_short_link(self, slug: str) -> Optional[str]:
         if hasattr(self.shortener, "resolve"):
             try:
@@ -1029,12 +1095,19 @@ class _Handler(BaseHTTPRequestHandler):
                     self._send_json(HTTPStatus.NOT_FOUND, {"error": "Short link not found", "requestId": request_id})
                     return
                 self.backend.record_short_link_click(slug)
+                # Real client attribution (spec R3.5/R3.6/T5 part 1): `remote_addr` is
+                # the TCP peer, which on Cloud Run is a Google front-end link-local IP
+                # (169.254.x.x) — useless for bot/dedup. XFF holds the real caller.
+                client_ip = _first_forwarded_for(self.headers.get("X-Forwarded-For")) or remote_addr
+                user_agent = (self.headers.get("User-Agent") or "")[:200]
+                proxy_ip = remote_addr
                 # Emit book_click for the feedback loop — slug is joined against recent
                 # book_impression events in book_intel.feedback.rollup to recover isbn+cluster.
                 source_tag = (
                     self.headers.get("X-OpenClaw-Source")
                     or _infer_click_source(self.headers.get("Referer", ""))
                 )
+                attribution = self._attribution_context()
                 try:
                     self.backend.analytics_store.record_event(
                         event_type="book_click",
@@ -1044,15 +1117,44 @@ class _Handler(BaseHTTPRequestHandler):
                             "client_id": self._client_id_from_headers(),
                             "referer": (self.headers.get("Referer") or "")[:200],
                         },
-                        **_attribution_kwargs(self._attribution_context()),
+                        client_ip=client_ip,
+                        user_agent=user_agent,
+                        proxy_ip=proxy_ip,
+                        **_attribution_kwargs(attribution),
                     )
                 except Exception as exc:
                     log_event("feedback_error", stage="book_click", slug=slug, error=str(exc))
+                # Durable shortlink_redirect event row — this is what the weekly proxy-GMV
+                # batch and daily reconciliation job read from (spec T5 parts 4/5). The
+                # metadata mirrors the log fields below so we can still eyeball a redirect
+                # in stdout without hitting the events table.
+                try:
+                    self.backend.analytics_store.record_event(
+                        event_type="shortlink_redirect",
+                        metadata={
+                            "slug": slug,
+                            "request_id": request_id,
+                            "referer": (self.headers.get("Referer") or "")[:200],
+                        },
+                        client_ip=client_ip,
+                        user_agent=user_agent,
+                        proxy_ip=proxy_ip,
+                        **_attribution_kwargs(attribution),
+                    )
+                except Exception as exc:
+                    log_event("shortlink_redirect_store_error", slug=slug, error=str(exc))
                 self.send_response(HTTPStatus.FOUND)
                 self.send_header("X-Request-Id", request_id)
                 self.send_header("Location", target)
                 self.end_headers()
-                log_event("shortlink_redirect", request_id=request_id, slug=slug, remote_addr=remote_addr)
+                log_event(
+                    "shortlink_redirect",
+                    request_id=request_id,
+                    slug=slug,
+                    client_ip=client_ip,
+                    user_agent=user_agent,
+                    proxy_ip=proxy_ip,
+                )
                 return
             if self.path in ("/health", "/healthz"):
                 self._send_json(HTTPStatus.OK, {**self.backend.health(), "requestId": request_id}, head_only=head_only)
@@ -1074,6 +1176,41 @@ class _Handler(BaseHTTPRequestHandler):
                     return
                 self._authorize_internal(request_id=request_id, remote_addr=remote_addr)
                 self._send_json(HTTPStatus.OK, {**self.backend.summary(), "requestId": request_id}, head_only=head_only)
+                return
+            split_path = urlsplit(self.path)
+            path_only = split_path.path
+            if path_only == "/v1/admin/gmv/proxy":
+                # Admin read-only view of the weekly shortlink proxy-GMV batch output
+                # (spec T5 part 6 / R3.3). The batch itself runs out-of-process — this
+                # endpoint is just a sqlite passthrough so the T6 pitch dashboard can
+                # render without also holding the economics module.
+                if not _operator_routes_enabled():
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id}, head_only=head_only)
+                    return
+                self._authorize_internal(request_id=request_id, remote_addr=remote_addr)
+                week_start = _query_param(split_path.query, "week_start")
+                rows = self.backend.proxy_gmv_rows(week_start=week_start)
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"rows": rows, "week_start": week_start, "requestId": request_id},
+                    head_only=head_only,
+                )
+                return
+            if path_only == "/v1/admin/click-reconciliation":
+                # Daily click-gap row (spec T5 part 6 / R3.8). Returns 200 + a null row
+                # rather than 404 on missing data, so dashboards can render "no data yet"
+                # without branching on HTTP status.
+                if not _operator_routes_enabled():
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id}, head_only=head_only)
+                    return
+                self._authorize_internal(request_id=request_id, remote_addr=remote_addr)
+                date_kst = _query_param(split_path.query, "date")
+                row = self.backend.click_reconciliation_row(date_kst=date_kst)
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"row": row, "date": date_kst, "requestId": request_id},
+                    head_only=head_only,
+                )
                 return
             if self.path == "/v1/public/goldbox":
                 client_marker = self._authorize_public(request_id=request_id, remote_addr=remote_addr)

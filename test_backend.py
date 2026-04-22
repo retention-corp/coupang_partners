@@ -696,5 +696,189 @@ class ResponseCacheTests(unittest.TestCase):
         self.assertEqual(Counter.calls, 2)
 
 
+# ---------------------------------------------------------------------------- #
+# T5: shortlink redirect attribution handler tests.
+# Real-world baseline (2026-04-21): 6 raw redirects, Coupang reported 1 click.
+# Investigation found every remote_addr was the Google FE proxy link-local IP.
+# These tests pin that the handler now captures XFF+UA on the stored event row.
+# ---------------------------------------------------------------------------- #
+class ShortlinkAttributionHandlerTests(unittest.TestCase):
+    """Own server+DB fixture — independent from BackendTests so we don't re-run its tests."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self._saved_env = {
+            "OPENCLAW_SHOPPING_API_TOKENS": os.environ.get("OPENCLAW_SHOPPING_API_TOKENS"),
+            "OPENCLAW_SHOPPING_API_TOKEN": os.environ.get("OPENCLAW_SHOPPING_API_TOKEN"),
+            "OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES": os.environ.get("OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES"),
+        }
+        for key in self._saved_env:
+            os.environ.pop(key, None)
+        os.environ["OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES"] = "true"
+        _Handler.rate_limiter = RateLimiter(window_seconds=60, max_requests=30)
+        _Handler.public_rate_limiter = None
+        _Handler.authenticated_rate_limiter = None
+        _Handler.admin_rate_limiter = None
+        self.server = build_server(
+            host="127.0.0.1",
+            port=0,
+            adapter=FakeAdapter(),
+            db_path=f"{self.tempdir.name}/analytics.sqlite3",
+            public_base_url="https://go.example.com",
+        )
+        self.thread = serve_in_thread(self.server)
+        self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.tempdir.cleanup()
+        for key, value in self._saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _read_shortlink_redirect_events(self):
+        db_path = f"{self.tempdir.name}/analytics.sqlite3"
+        with sqlite3.connect(db_path) as connection:
+            rows = connection.execute(
+                "SELECT client_ip, user_agent, proxy_ip, metadata_json "
+                "FROM events WHERE event_type = 'shortlink_redirect' "
+                "ORDER BY created_at ASC"
+            ).fetchall()
+        return rows
+
+    def _seed_slug(self):
+        assist_request = request.Request(
+            f"{self.base_url}/v1/public/assist",
+            data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        assist = json.loads(request.urlopen(assist_request, timeout=5).read().decode("utf-8"))
+        return assist["best_fit"]["short_deeplink"].rsplit("/", 1)[-1]
+
+    def test_shortlink_redirect_logs_xff_and_ua(self):
+        slug = self._seed_slug()
+
+        class NoRedirect(request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        req_obj = request.Request(
+            f"{self.base_url}/s/{slug}",
+            headers={
+                "X-Forwarded-For": "1.2.3.4, 5.6.7.8",
+                "User-Agent": "curl/7.88.1",
+            },
+        )
+        opener = request.build_opener(NoRedirect)
+        with self.assertRaises(error.HTTPError) as ctx:
+            opener.open(req_obj, timeout=5)
+        ctx.exception.close()
+
+        rows = self._read_shortlink_redirect_events()
+        self.assertEqual(len(rows), 1)
+        client_ip, user_agent, proxy_ip, _ = rows[0]
+        self.assertEqual(client_ip, "1.2.3.4")
+        self.assertEqual(user_agent, "curl/7.88.1")
+        # proxy_ip is whatever the TCP peer looks like from a loopback connection —
+        # we just assert it's present and distinct from the XFF client_ip.
+        self.assertTrue(proxy_ip)
+        self.assertNotEqual(proxy_ip, client_ip)
+
+    def test_shortlink_redirect_fallback_without_xff(self):
+        slug = self._seed_slug()
+
+        class NoRedirect(request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        req_obj = request.Request(
+            f"{self.base_url}/s/{slug}",
+            headers={"User-Agent": "probe/1.0"},
+        )
+        opener = request.build_opener(NoRedirect)
+        with self.assertRaises(error.HTTPError) as ctx:
+            opener.open(req_obj, timeout=5)
+        ctx.exception.close()
+
+        rows = self._read_shortlink_redirect_events()
+        self.assertEqual(len(rows), 1)
+        client_ip, user_agent, proxy_ip, _ = rows[0]
+        # Without XFF, client_ip == TCP peer.
+        self.assertEqual(client_ip, proxy_ip)
+        self.assertTrue(client_ip)
+        self.assertEqual(user_agent, "probe/1.0")
+
+    def test_admin_proxy_gmv_endpoint_returns_written_rows(self):
+        """Part 6: GET /v1/admin/gmv/proxy surfaces rows the weekly batch wrote."""
+
+        # Seed one shortlink_redirect + run the batch so the admin endpoint has data.
+        import uuid as _uuid
+        from datetime import datetime as _dt, timezone as _tz
+
+        from economics import KST, compute_weekly_proxy_gmv
+
+        db_path = f"{self.tempdir.name}/analytics.sqlite3"
+        week_start = _dt(2026, 4, 20, 0, 0, 0, tzinfo=KST)
+        click_time_utc = _dt(2026, 4, 21, 12, 0, 0, tzinfo=KST).astimezone(_tz.utc)
+        with sqlite3.connect(db_path) as connection:
+            connection.execute(
+                "INSERT INTO events ("
+                "id, event_type, metadata_json, created_at, "
+                "surface, client_ip, user_agent, proxy_ip"
+                ") VALUES (?, 'shortlink_redirect', ?, ?, 'cli', '1.2.3.4', 'curl', '169.254.169.126')",
+                (
+                    str(_uuid.uuid4()),
+                    '{"slug": "xdZ9Rzh"}',
+                    click_time_utc.isoformat(),
+                ),
+            )
+        compute_weekly_proxy_gmv(week_start, db_path=db_path)
+
+        req_obj = request.Request(
+            f"{self.base_url}/v1/admin/gmv/proxy?week_start=2026-04-20"
+        )
+        payload = json.loads(request.urlopen(req_obj, timeout=5).read().decode("utf-8"))
+        self.assertIn("rows", payload)
+        self.assertEqual(len(payload["rows"]), 1)
+        self.assertEqual(payload["rows"][0]["surface"], "cli")
+        self.assertEqual(payload["rows"][0]["label"], "attributed_estimate")
+
+    def test_admin_click_reconciliation_endpoint_returns_null_when_missing(self):
+        """Part 6: GET /v1/admin/click-reconciliation?date=... returns 200 with null row."""
+
+        req_obj = request.Request(
+            f"{self.base_url}/v1/admin/click-reconciliation?date=2026-04-21"
+        )
+        payload = json.loads(request.urlopen(req_obj, timeout=5).read().decode("utf-8"))
+        self.assertEqual(payload["date"], "2026-04-21")
+        self.assertIsNone(payload["row"])
+
+    def test_shortlink_redirect_truncates_long_user_agent(self):
+        slug = self._seed_slug()
+
+        class NoRedirect(request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        long_ua = "A" * 500
+        req_obj = request.Request(
+            f"{self.base_url}/s/{slug}",
+            headers={"User-Agent": long_ua},
+        )
+        opener = request.build_opener(NoRedirect)
+        with self.assertRaises(error.HTTPError) as ctx:
+            opener.open(req_obj, timeout=5)
+        ctx.exception.close()
+
+        rows = self._read_shortlink_redirect_events()
+        self.assertEqual(len(rows), 1)
+        _, user_agent, _, _ = rows[0]
+        self.assertEqual(len(user_agent), 200)
+
+
 if __name__ == "__main__":
     unittest.main()
