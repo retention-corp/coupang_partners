@@ -46,7 +46,7 @@ scripts/deploy_gcp_cloud_run.sh
 1. `security.validate_payload_limits` + rate limit (public/auth/admin buckets).
 2. `recommendation.normalize_request` → `recommendation.build_search_queries` plans queries.
 3. `backend.ShoppingBackend._search_products` calls `client.CoupangPartnersClient` (HMAC-SHA256 over `signed-date + METHOD + path + raw_querystring`).
-4. `product_page_evidence.enrich_products_with_page_evidence` scrapes landing-page signals (best-effort, time-boxed).
+4. `product_page_evidence.enrich_products_with_page_evidence` scrapes landing-page signals. **Per-product timeout 8s, total wall budget 20s, max concurrency 5; on exceed, return whatever is collected without retrying.**
 5. `recommendation.recommend_products` applies category exclusion maps, must-have token rules, extremum-intent sorting (`_EXTREMUM_RULES` handles 제일 긴 / 최저가 / 평점 / 리뷰), and evidence grounding from `evidence.build_evidence`.
 6. `url_shortener` attaches `short_deeplink`; `analytics.AnalyticsStore` logs query/recommendation/evidence counts.
 
@@ -64,8 +64,8 @@ If Firestore short-link generation fails, the backend falls back to the raw affi
 
 ### Public vs internal endpoint split
 
-- Public, tokenless: `GET /health`, `POST /v1/public/assist`, `POST /v1/public/events`, `POST /v1/public/deeplinks`, `GET /s/<slug>`.
-- Bearer-auth required: `POST /internal/v1/assist|events|deeplinks`, `GET /v1/admin/summary`.
+- Public, tokenless: `GET /health`, `POST /v1/public/assist`, `POST /v1/public/recommendations`, `POST /v1/public/search`, `GET /v1/public/goldbox`, `GET /v1/public/best/{category_id}`, `GET /s/<slug>`. There is no `/v1/public/events` or `/v1/public/deeplinks` — public callers do not write events; deeplink minting is server-side inside `/v1/public/assist|search` responses.
+- Bearer-auth + operator-routes-enabled: `POST /v1/assist|recommendations|events|deeplinks` and their `/internal/v1/...` aliases, `GET /v1/admin/summary|gmv/proxy|click-reconciliation`. These return 404 on the public Cloud Run service unless `OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES=true`; production posture keeps them on the separate `a-retn-shortener-ops` service (see `docs/openclaw-shopping-backend.md`).
 - Optional hardening: `OPENCLAW_SHOPPING_CLIENT_ALLOWLIST_ENABLED=true` + `OPENCLAW_SHOPPING_CLIENT_ALLOWLIST=...`; separate `RATE_LIMIT_{REQUESTS,WINDOW_SECONDS}_{PUBLIC,AUTH,ADMIN}` env vars.
 - Deeplink host allowlist is enforced in `security.validate_deeplink_url` (`coupang.com`, `link.coupang.com`, `www.coupang.com`).
 
@@ -81,7 +81,7 @@ Imported from the standalone `kbook-reco` MVP. Three-layer shape: providers (Nav
 
 ## Hard rules
 
-- Never commit real `COUPANG_ACCESS_KEY`, `COUPANG_SECRET_KEY`, or operator bearer tokens. `.env.local` is local-only convenience; treat it as untrusted for anything shared.
+- Never commit real `COUPANG_ACCESS_KEY`, `COUPANG_SECRET_KEY`, or operator bearer tokens. `.env.local` is local-only convenience. **Untrusted means: do not paste its contents into PRs, GitHub issues, Slack, blog drafts, public gists, or any chat that is not 1:1 DM with the credential owner. When asked to share a sample, mask values as `COUPANG_ACCESS_KEY=AK_xxxxxxxx`.**
 - Public skill packages must never embed backend/Coupang secrets. Keep affiliate deeplink creation server-side.
 - Prefer Reco v2 for new work; v1 is a thin compatibility wrapper only.
 - Evidence must degrade gracefully — never claim review/detail analysis when only metadata is available. Low-confidence summaries stay explicitly conservative (see `evidence.py` and the `recommendation` confidence plumbing).
