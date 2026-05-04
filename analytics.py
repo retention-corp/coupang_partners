@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import sqlite3
@@ -19,7 +20,7 @@ class AnalyticsStore:
         self.initialize()
 
     def initialize(self) -> None:
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript(
                 """
@@ -119,7 +120,7 @@ class AnalyticsStore:
     ) -> str:
         query_id = str(uuid.uuid4())
         created_at = _utc_now()
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.execute(
                 "INSERT INTO queries (id, query_text, budget, category, created_at, client_id) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
@@ -176,7 +177,7 @@ class AnalyticsStore:
         proxy_ip: Optional[str] = None,
     ) -> str:
         event_id = str(uuid.uuid4())
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.execute(
                 "INSERT INTO events ("
                 "id, query_id, recommendation_id, event_type, metadata_json, created_at, "
@@ -203,7 +204,7 @@ class AnalyticsStore:
         return event_id
 
     def get_summary(self) -> Dict[str, Any]:
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection, connection:
             counts = {
                 "total_queries": connection.execute("SELECT COUNT(*) FROM queries").fetchone()[0],
                 "total_recommendations": connection.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0],
@@ -260,7 +261,7 @@ class AnalyticsStore:
 
         if not client_id:
             return []
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection, connection:
             rows = connection.execute(
                 "SELECT query_text, category, budget, created_at "
                 "FROM queries WHERE client_id = ? "

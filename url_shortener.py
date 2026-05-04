@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import secrets
@@ -45,7 +46,7 @@ class BuiltinShortener(UrlShortener):
         return f"{self.public_base_url}/s/{slug}"
 
     def resolve(self, slug: str) -> Optional[str]:
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection, connection:
             row = connection.execute(
                 "SELECT target_url FROM short_links WHERE slug = ?",
                 (slug,),
@@ -53,7 +54,7 @@ class BuiltinShortener(UrlShortener):
         return row[0] if row else None
 
     def record_click(self, slug: str) -> None:
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.execute(
                 """
                 UPDATE short_links
@@ -65,7 +66,7 @@ class BuiltinShortener(UrlShortener):
             )
 
     def get_summary(self) -> Dict[str, int]:
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection, connection:
             total_short_links = connection.execute("SELECT COUNT(*) FROM short_links").fetchone()[0]
             total_short_link_clicks = connection.execute("SELECT COALESCE(SUM(click_count), 0) FROM short_links").fetchone()[0]
         return {
@@ -74,7 +75,7 @@ class BuiltinShortener(UrlShortener):
         }
 
     def _initialize(self) -> None:
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS short_links (
@@ -88,7 +89,7 @@ class BuiltinShortener(UrlShortener):
             )
 
     def _ensure_slug(self, url: str) -> str:
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection, connection:
             existing = connection.execute(
                 "SELECT slug FROM short_links WHERE target_url = ?",
                 (url,),
