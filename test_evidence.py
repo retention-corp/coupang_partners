@@ -42,6 +42,17 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn("Landing page snippet count: 1", evidence["facts"])
         self.assertFalse(any("rationale relies on product metadata" in risk for risk in evidence["risks"]))
 
+    def test_build_evidence_reports_missing_review_metadata_honestly(self):
+        evidence = build_evidence(
+            {
+                "title": "무선청소기",
+                "deeplink": "https://example.com/p/1",
+            },
+            "무선청소기 리뷰 많은 것",
+        )
+
+        self.assertIn("Upstream metadata did not provide rating or review-count evidence.", evidence["risks"])
+
 
 if __name__ == "__main__":
     unittest.main()

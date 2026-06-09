@@ -43,6 +43,24 @@ class CliTests(unittest.TestCase):
                 "https://a.retn.kr",
             )
 
+    def test_cli_prefers_operator_base_url_for_internal_api(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "OPENCLAW_SHOPPING_USE_INTERNAL_API": "true",
+                "OPENCLAW_SHOPPING_OPERATOR_BASE_URL": "https://a-retn-shortener-ops-12345.us-central1.run.app",
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                openclaw_cli._base_url_from_env(),
+                "https://a-retn-shortener-ops-12345.us-central1.run.app",
+            )
+            self.assertEqual(
+                openclaw_cli._normalize_backend_base_url("https://a-retn-shortener-ops-12345.us-central1.run.app"),
+                "https://a-retn-shortener-ops-12345.us-central1.run.app",
+            )
+
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.server = build_server(

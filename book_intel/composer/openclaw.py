@@ -54,7 +54,8 @@ class ComposerConfig:
     cli_path: str = "openclaw"
     prompt_dir: Path = _PROMPT_DIR
     session_prefix: str = "book-intel"
-    tags_prefix: list[str] = field(default_factory=lambda: ["도서추천", "쿠팡파트너스"])
+    tags_prefix: list[str] = field(default_factory=lambda: ["#blog-col", "도서추천", "쿠팡파트너스"])
+    prompt_variant: str = "canvas"       # "canvas" (new, Content Canvas) | "blog" (legacy narrative)
 
 
 def compose_post(
@@ -72,9 +73,10 @@ def compose_post(
 
     cfg = config or ComposerConfig()
     tier_norm = _normalize_tier(tier)
-    prompt_text = _render_prompt(raw, tier=tier_norm, prompt_dir=cfg.prompt_dir)
+    prompt_text = _render_prompt(raw, tier=tier_norm, prompt_dir=cfg.prompt_dir, variant=cfg.prompt_variant)
     session_id = _session_id(raw, tier_norm, prefix=cfg.session_prefix)
 
+    base_prompt = prompt_text
     last_error: str = ""
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
@@ -100,6 +102,21 @@ def compose_post(
             LOGGER.warning("%s (attempt %d)", last_error, attempt)
             # Append a stricter nudge for the next attempt.
             prompt_text = prompt_text + "\n\nREMINDER: Output ONLY the JSON object, no code fences, no prose before/after."
+            continue
+
+        if post.get("error") == "insufficient_signal":
+            raise CompositionError("composer refused: insufficient_signal")
+
+        repetition = _detect_repetition(post.get("body", ""))
+        if repetition and attempt < _MAX_RETRIES:
+            last_error = f"repeated n-gram: {repetition[:3]}"
+            LOGGER.warning("%s (attempt %d); nudging rewrite", last_error, attempt)
+            prompt_text = base_prompt + (
+                "\n\nREVISION: your previous draft repeated these phrases too many times: "
+                + json.dumps(repetition, ensure_ascii=False)
+                + ". Rewrite the body so no 3-gram noun phrase appears more than 3 times. "
+                "Vary vocabulary, don't just cut — re-angle the argument."
+            )
             continue
 
         return _finalize(post, raw, tier=tier_norm, cfg=cfg)
@@ -189,19 +206,54 @@ def _parse_post_json(text: str) -> dict[str, Any] | None:
     try:
         obj = json.loads(cleaned)
     except Exception:
-        # Try to locate a JSON object within prose.
-        match = re.search(r"\{(?:[^{}]|\{[^{}]*\})*\}", cleaned, re.DOTALL)
-        if not match:
-            return None
-        try:
-            obj = json.loads(match.group(0))
-        except Exception:
+        # The model sometimes wraps JSON inside prose. Greedy-match the outermost
+        # braces; plain `\{...\}` non-greedy fails on nested canvas objects (FAQ,
+        # JSON-LD, youtube_short) so we walk until braces balance.
+        obj = _extract_balanced_json(cleaned)
+        if obj is None:
             return None
     if not isinstance(obj, dict):
         return None
+    if obj.get("error") == "insufficient_signal":
+        return obj  # let caller handle the refusal
     if not isinstance(obj.get("title"), str) or not isinstance(obj.get("body"), str):
         return None
     return obj
+
+
+def _extract_balanced_json(text: str) -> dict[str, Any] | None:
+    """Find the first `{...}` block with balanced braces and try to parse it."""
+
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        in_str = False
+        esc = False
+        for idx in range(start, len(text)):
+            ch = text[idx]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start : idx + 1]
+                    try:
+                        return json.loads(candidate)
+                    except Exception:
+                        break
+        start = text.find("{", start + 1)
+    return None
 
 
 def _strip_code_fences(text: str) -> str:
@@ -214,8 +266,9 @@ def _strip_code_fences(text: str) -> str:
     return text.strip()
 
 
-def _render_prompt(raw: dict[str, Any], *, tier: str, prompt_dir: Path) -> str:
-    template = _load_template(prompt_dir / f"blog_{tier.lower()}_tier.md")
+def _render_prompt(raw: dict[str, Any], *, tier: str, prompt_dir: Path, variant: str = "canvas") -> str:
+    prefix = "canvas" if variant == "canvas" else "blog"
+    template = _load_template(prompt_dir / f"{prefix}_{tier.lower()}_tier.md")
     return template.replace("{{PAYLOAD_JSON}}", json.dumps(raw, ensure_ascii=False, indent=2))
 
 
@@ -245,23 +298,105 @@ def _finalize(post: dict[str, Any], raw: dict[str, Any], *, tier: str, cfg: Comp
     title = (post.get("title") or "").strip()
     lead = (post.get("lead") or "").strip()
     body = (post.get("body") or "").strip()
-    tags = post.get("tags") or []
-    if not isinstance(tags, list):
-        tags = []
-    tags = [str(t).strip() for t in tags if str(t).strip()]
-    # Always prepend platform tags so posts are discoverable by category.
+    tags_raw = post.get("tags") or []
+    tags = [str(t).strip() for t in (tags_raw if isinstance(tags_raw, list) else []) if str(t).strip()]
     for pre in reversed(cfg.tags_prefix):
         if pre not in tags:
             tags.insert(0, pre)
-    return {
+
+    variant_slug = cfg.prompt_variant  # "canvas" or "blog"
+    finalized: dict[str, Any] = {
         "title": title,
         "lead": lead,
         "body_markdown": body,
         "tags": tags,
-        "prompt_variant": f"blog_{tier.lower()}_tier",
+        "prompt_variant": f"{variant_slug}_{tier.lower()}_tier",
         "tier": tier,
         "book": book,
     }
+
+    # Preserve every Canvas field the prompt may have emitted. Downstream (Ghost
+    # publisher, newsletter, YouTube) picks what it needs; missing keys stay
+    # `None`/`[]` so templates don't blow up on B-tier / sparse payloads.
+    canvas_fields = {
+        "definition_lead": _as_text(post.get("definition_lead")),
+        "subtitle": _as_text(post.get("subtitle")),
+        "pros": _as_list(post.get("pros")),
+        "cons": _as_list(post.get("cons")),
+        "key_takeaways": _as_list(post.get("key_takeaways")),
+        "comparisons": _as_list(post.get("comparisons")),
+        "target_reader": _as_list(post.get("target_reader")),
+        "not_for": _as_list(post.get("not_for")),
+        "actionable_exercise": _as_text(post.get("actionable_exercise")),
+        "timely_hook": _as_text(post.get("timely_hook")),
+        "faq": _as_faq(post.get("faq")),
+        "youtube_short": _as_dict(post.get("youtube_short")),
+        "newsletter_snippet": _as_text(post.get("newsletter_snippet")),
+        "thread_tweets": _as_list(post.get("thread_tweets")),
+        "schema_jsonld": _as_dict(post.get("schema_jsonld")),
+        "faq_jsonld": _as_dict(post.get("faq_jsonld")),
+        "internal_link_seeds": _as_list(post.get("internal_link_seeds")),
+    }
+    finalized.update({k: v for k, v in canvas_fields.items() if v not in (None, [], {})})
+    # Book metadata + primary Coupang CTA info for the publisher.
+    primary = (raw or {}).get("primary_coupang") or {}
+    canvas_fields["book_title"] = book.get("title") or ""
+    canvas_fields["primary_coupang_deeplink"] = primary.get("deeplink") or ""
+    canvas_fields["primary_coupang_short_deeplink"] = primary.get("short_deeplink") or ""
+    # Similar books with Coupang links — publisher post-processes comparisons
+    # so every mentioned book title gets wrapped in its short deeplink even
+    # when the composer forgot.
+    canvas_fields["similar_books_with_coupang"] = (raw or {}).get("similar_books_with_coupang") or []
+    finalized["canvas"] = canvas_fields
+    return finalized
+
+
+def _as_text(value: Any) -> str:
+    return str(value).strip() if isinstance(value, (str, int, float)) else ""
+
+
+def _as_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(v).strip() for v in value if isinstance(v, (str, int, float)) and str(v).strip()]
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _detect_repetition(text: str, *, max_repeats: int = 3, ngram: int = 3) -> list[str]:
+    """Return noun 3-grams that appear more than `max_repeats` times in `text`.
+
+    Rough heuristic: split on whitespace/punctuation, drop tokens < 2 chars, slide
+    a 3-gram window, count. Korean postpositions leak in but frequency is still
+    a good proxy for "same phrase over and over".
+    """
+
+    if not text:
+        return []
+    tokens = [
+        tok for tok in re.split(r"[\s\.,\!\?\"'()\[\]《》\-\:\;·/\n\t]+", text) if len(tok) >= 2
+    ]
+    from collections import Counter
+    grams: Counter[str] = Counter()
+    for i in range(len(tokens) - ngram + 1):
+        grams[" ".join(tokens[i : i + ngram])] += 1
+    return [gram for gram, count in grams.most_common(8) if count > max_repeats]
+
+
+def _as_faq(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        q = _as_text(item.get("q") or item.get("question"))
+        a = _as_text(item.get("a") or item.get("answer"))
+        if q and a:
+            out.append({"q": q, "a": a})
+    return out
 
 
 __all__ = ["CompositionError", "ComposerConfig", "compose_post"]

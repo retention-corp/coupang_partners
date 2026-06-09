@@ -246,6 +246,17 @@ class AnalyticsStore:
             }
         return summary
 
+    def get_affiliate_observability(self) -> Dict[str, Any]:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection, connection:
+            rows = connection.execute(
+                """
+                SELECT event_type, metadata_json
+                FROM events
+                WHERE event_type IN ('shortlink_redirect', 'book_click')
+                """
+            ).fetchall()
+        return _summarize_affiliate_events(rows)
+
     def get_recent_queries_for_client(
         self,
         client_id: str,
@@ -422,6 +433,39 @@ class FirestoreAnalyticsStore:
             "event_breakdown": event_breakdown,
             "category_breakdown": category_breakdown,
         }
+
+    def get_affiliate_observability(self) -> Dict[str, Any]:
+        rows = []
+        for event_type in ("shortlink_redirect", "book_click"):
+            response = self._request_json(
+                "POST",
+                f"{self.documents_url}:runQuery",
+                body={
+                    "structuredQuery": {
+                        "from": [{"collectionId": self.collections["events"]}],
+                        "where": {
+                            "fieldFilter": {
+                                "field": {"fieldPath": "event_type"},
+                                "op": "EQUAL",
+                                "value": {"stringValue": event_type},
+                            }
+                        },
+                        "select": {
+                            "fields": [
+                                {"fieldPath": "event_type"},
+                                {"fieldPath": "metadata_json"},
+                            ],
+                        },
+                        "limit": 5000,
+                    }
+                },
+            )
+            for item in _as_sequence(response):
+                document = (item or {}).get("document")
+                if not document:
+                    continue
+                rows.append((event_type, _firestore_string(document, "metadata_json") or "{}"))
+        return _summarize_affiliate_events(rows)
 
     def get_recent_queries_for_client(
         self,
@@ -666,6 +710,38 @@ def _as_sequence(value: Any) -> Sequence[Any]:
     if value is None:
         return ()
     return (value,)
+
+
+def _summarize_affiliate_events(rows: Iterable[Sequence[Any]]) -> Dict[str, Any]:
+    summary = {
+        "redirect_events": 0,
+        "book_click_events": 0,
+        "affiliate_tagged_redirects": 0,
+        "affiliate_tagged_book_clicks": 0,
+        "affiliate_link_sources": {},
+        "affiliate_tags": {},
+    }
+    for row in rows:
+        event_type = row[0] if len(row) > 0 else ""
+        metadata_raw = row[1] if len(row) > 1 else "{}"
+        try:
+            metadata = json.loads(metadata_raw or "{}")
+        except (TypeError, json.JSONDecodeError):
+            metadata = {}
+        if event_type == "shortlink_redirect":
+            summary["redirect_events"] += 1
+            if metadata.get("affiliate_tag_present"):
+                summary["affiliate_tagged_redirects"] += 1
+        elif event_type == "book_click":
+            summary["book_click_events"] += 1
+            if metadata.get("affiliate_tag_present"):
+                summary["affiliate_tagged_book_clicks"] += 1
+        source = str(metadata.get("affiliate_link_source") or "unknown")
+        summary["affiliate_link_sources"][source] = summary["affiliate_link_sources"].get(source, 0) + 1
+        tag = str(metadata.get("affiliate_tag") or "")
+        if tag:
+            summary["affiliate_tags"][tag] = summary["affiliate_tags"].get(tag, 0) + 1
+    return summary
 
 
 def _firestore_fields(document: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:

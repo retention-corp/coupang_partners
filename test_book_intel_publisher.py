@@ -99,6 +99,86 @@ class PayloadTests(unittest.TestCase):
         self.assertIn("<li>포인트 A</li>", body["html"])
         self.assertEqual(body["custom_excerpt"], "리드 요약")
 
+    def test_canvas_injects_faq_and_jsonld(self) -> None:
+        canvas = {
+            "pros": ["깊이", "구체성"],
+            "cons": ["느림"],
+            "key_takeaways": ["요약 1"],
+            "comparisons": ["A보다 B한 책"],
+            "target_reader": ["엔지니어"],
+            "not_for": ["빠른 팁 찾는 독자"],
+            "actionable_exercise": "48시간 실험 설명",
+            "timely_hook": "지금 읽을 이유",
+            "faq": [
+                {"q": "이 책 요약?", "a": "한 줄 답."},
+                {"q": "얼마나 걸리나?", "a": "3시간."},
+            ],
+            "schema_jsonld": {"@context": "https://schema.org", "@type": "Review", "itemReviewed": {"name": "X"}},
+            "faq_jsonld": {"@context": "https://schema.org", "@type": "FAQPage", "mainEntity": []},
+        }
+        preview = self.client.preview_post(
+            title="제목",
+            lead="리드",
+            body_markdown="본문",
+            tags=["t"],
+            canvas=canvas,
+        )
+        body = preview["body"]["posts"][0]
+        html = body["html"]
+        self.assertIn("<h2>장점</h2>", html)
+        self.assertIn("<li>깊이</li>", html)
+        self.assertIn("<h2>단점</h2>", html)
+        self.assertIn("<h2>핵심 요약</h2>", html)
+        self.assertIn("<h2>비슷한 책과의 비교</h2>", html)
+        self.assertIn("<h2>자주 묻는 질문</h2>", html)
+        self.assertIn('schema.org/FAQPage', html)
+        self.assertIn('<h3 itemprop="name">이 책 요약?</h3>', html)
+        self.assertIn('<p itemprop="text">한 줄 답.</p>', html)
+        self.assertIn("48시간으로 검증", html)
+        self.assertIn("48시간 실험 설명", html)
+        # JSON-LD goes into codeinjection_head, not body HTML
+        self.assertNotIn("application/ld+json", html)
+        head = body["codeinjection_head"]
+        self.assertIn('type="application/ld+json"', head)
+        self.assertIn("Review", head)
+        self.assertIn("FAQPage", head)
+        # Safety: embedded `<` escaped as \u003c
+        self.assertIn("\\u003c", head) if "<" in json.dumps(canvas["schema_jsonld"], ensure_ascii=False) else None
+
+    def test_update_post_preserves_canvas_html_and_head(self) -> None:
+        import urllib.request as _req, io as _io
+        canvas = {
+            "faq": [{"q": "q", "a": "a"}],
+            "schema_jsonld": {"@context": "https://schema.org", "@type": "Review"},
+        }
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            captured["method"] = req.get_method()
+            captured["url"] = req.full_url
+            captured["body"] = req.data.decode("utf-8")
+            resp = mock.MagicMock()
+            resp.read.return_value = b'{"posts":[{"id":"abc123"}]}'
+            resp.__enter__ = lambda self: self
+            resp.__exit__ = lambda *a: None
+            return resp
+
+        with mock.patch.object(_req, "urlopen", side_effect=fake_urlopen):
+            self.client.update_post(
+                post_id="abc123",
+                updated_at="2026-04-18T00:00:00.000Z",
+                title="새 제목",
+                body_markdown="새 본문",
+                canvas=canvas,
+            )
+        self.assertEqual(captured["method"], "PUT")
+        self.assertIn("/ghost/api/admin/posts/abc123/", captured["url"])
+        payload = json.loads(captured["body"])
+        post = payload["posts"][0]
+        self.assertEqual(post["title"], "새 제목")
+        self.assertIn("schema.org/FAQPage", post["html"])
+        self.assertIn('type="application/ld+json"', post["codeinjection_head"])
+
     def test_missing_title_raises(self) -> None:
         with self.assertRaises(GhostPublishError):
             self.client.preview_post(title="", lead="x", body_markdown="body")
@@ -112,9 +192,10 @@ class MarkdownConversionTests(unittest.TestCase):
     def test_paragraph(self) -> None:
         self.assertEqual(_markdown_to_html("hello"), "<p>hello</p>")
 
-    def test_h2_and_h3(self) -> None:
+    def test_h2_h3_and_h4(self) -> None:
         self.assertIn("<h2>Title</h2>", _markdown_to_html("## Title"))
         self.assertIn("<h3>Sub</h3>", _markdown_to_html("### Sub"))
+        self.assertIn("<h4>Deep</h4>", _markdown_to_html("#### Deep"))
 
     def test_bullet_list(self) -> None:
         html = _markdown_to_html("- one\n- two\n\nafter")
@@ -122,6 +203,28 @@ class MarkdownConversionTests(unittest.TestCase):
         self.assertIn("<li>one</li>", html)
         self.assertIn("</ul>", html)
         self.assertIn("<p>after</p>", html)
+
+    def test_indented_bullet_list(self) -> None:
+        html = _markdown_to_html("  - one\n  - two")
+        self.assertIn("<ul>", html)
+        self.assertIn("<li>one</li>", html)
+        self.assertIn("<li>two</li>", html)
+
+    def test_ordered_list(self) -> None:
+        html = _markdown_to_html("1. first\n2. second")
+        self.assertIn("<ol>", html)
+        self.assertIn("<li>first</li>", html)
+        self.assertIn("<li>second</li>", html)
+        self.assertIn("</ol>", html)
+
+    def test_blockquote_with_bullets(self) -> None:
+        html = _markdown_to_html("> note\n>\n> - one\n> - two")
+        self.assertIn("<blockquote>", html)
+        self.assertIn("<p>note</p>", html)
+        self.assertIn("<ul>", html)
+        self.assertIn("<li>one</li>", html)
+        self.assertIn("<li>two</li>", html)
+        self.assertIn("</blockquote>", html)
 
     def test_bold_italic_link(self) -> None:
         html = _markdown_to_html("한국어 **강조** 와 *이탤릭* 그리고 [링크](https://x)")

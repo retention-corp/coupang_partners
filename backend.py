@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
 from analytics import AnalyticsStore, build_analytics_store_from_env
 from client import CoupangApiError, CoupangPartnersClient
@@ -66,6 +66,58 @@ _SURFACE_ENUM = frozenset(
 # Module-level set is fine — `_Handler` is per-request but shares the interpreter.
 _WARNED_UNKNOWN_SURFACES: set = set()
 _WARNED_UNKNOWN_SURFACES_LOCK = threading.Lock()
+
+
+def _fallback_affiliate_tag() -> str:
+    return (os.getenv("COUPANG_PARTNERS_FALLBACK_AFFILIATE_TAG") or "AF3727577").strip()
+
+
+def _fallback_affiliate_enabled() -> bool:
+    value = (os.getenv("COUPANG_PARTNERS_FALLBACK_AFFILIATE_ENABLED") or "true").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _affiliate_url_with_source(url: str, *, allowed_hosts: List[str]) -> Tuple[str, str]:
+    """Attach a Partners fallback tag to approved Coupang product URLs.
+
+    Official deeplink API output remains preferred. This path is an explicit degraded
+    fallback for cases where the API is locally rate-limited or upstream-limited, and
+    every produced URL is tagged with `affiliate_link_source` for later observation.
+    """
+
+    original = (url or "").strip()
+    if not original or not _fallback_affiliate_enabled():
+        return original, "none"
+    if not validate_deeplink_url(original, allowed_hosts):
+        return original, "invalid_target"
+    tag = _fallback_affiliate_tag()
+    if not tag:
+        return original, "none"
+    try:
+        parsed = urlsplit(original)
+    except ValueError:
+        return original, "invalid_target"
+    params = parse_qsl(parsed.query, keep_blank_values=True)
+    for key, value in params:
+        if key.lower() == "lptag" and value:
+            return original, "existing_lptag"
+    params.append(("lptag", tag))
+    tagged = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(params), parsed.fragment))
+    return tagged, "fallback_lptag"
+
+
+def _affiliate_observation_metadata(url: str, source: str) -> Dict[str, Any]:
+    try:
+        parsed = urlsplit(url or "")
+        params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    except ValueError:
+        params = {}
+    lptag = params.get("lptag")
+    return {
+        "affiliate_link_source": source,
+        "affiliate_tag_present": bool(lptag),
+        "affiliate_tag": lptag or "",
+    }
 
 
 def _normalize_surface(raw_value: Optional[str]) -> Tuple[str, Optional[str]]:
@@ -127,6 +179,10 @@ def _first_forwarded_for(header_value: Optional[str]) -> Optional[str]:
         return None
     first = header_value.split(",", 1)[0].strip()
     return first or None
+
+
+def _request_remote_addr(headers: Any, peer_addr: Optional[str]) -> str:
+    return normalize_client_ip(_first_forwarded_for(headers.get("X-Forwarded-For")) or peer_addr)
 
 
 def _attribution_kwargs(attribution: Optional[Dict[str, Optional[str]]]) -> Dict[str, Optional[str]]:
@@ -778,9 +834,25 @@ class ShoppingBackend:
         if invalid_urls:
             raise BackendError(HTTPStatus.BAD_REQUEST, "Only approved Coupang URLs may be shortened")
         if hasattr(self.adapter, "deeplink"):
-            response = self.adapter.deeplink(urls)
-            return {"ok": True, "data": self._attach_short_links_to_deeplink_response(response)}
-        raise BackendError(HTTPStatus.NOT_IMPLEMENTED, "Adapter does not support deeplink().")
+            try:
+                response = self.adapter.deeplink(urls)
+                return {"ok": True, "data": self._attach_short_links_to_deeplink_response(response)}
+            except CoupangApiError as exc:
+                if exc.status_code != 429:
+                    raise
+                log_event("coupang_deeplink_degraded", status_code=exc.status_code, reason=str(exc)[:200])
+                return {
+                    "ok": True,
+                    "degraded": f"coupang_api_status_{exc.status_code}",
+                    "data": self._fallback_deeplink_response(urls, degraded_reason=f"coupang_api_status_{exc.status_code}"),
+                    "disclosure": DISCLOSURE_TEXT,
+                }
+        return {
+            "ok": True,
+            "degraded": "adapter_missing_deeplink",
+            "data": self._fallback_deeplink_response(urls, degraded_reason="adapter_missing_deeplink"),
+            "disclosure": DISCLOSURE_TEXT,
+        }
 
     def goldbox(self) -> Dict[str, Any]:
         if not hasattr(self.adapter, "get_goldbox"):
@@ -905,8 +977,33 @@ class ShoppingBackend:
             log_event("shortener_error", stage="summary", error=str(exc))
             summary.setdefault("total_short_links", 0)
             summary.setdefault("total_short_link_clicks", 0)
+        try:
+            if hasattr(self.analytics_store, "get_affiliate_observability"):
+                summary["affiliate_observability"] = self.analytics_store.get_affiliate_observability()
+        except Exception as exc:
+            log_event("analytics_error", stage="affiliate_observability", error=str(exc))
+            summary["affiliate_observability"] = {
+                "redirect_events": 0,
+                "book_click_events": 0,
+                "affiliate_tagged_redirects": 0,
+                "affiliate_tagged_book_clicks": 0,
+                "affiliate_link_sources": {},
+                "affiliate_tags": {},
+            }
         summary["economics"] = build_economics_summary(summary)
         return summary
+
+    def affiliate_observability(self) -> Dict[str, Any]:
+        if not hasattr(self.analytics_store, "get_affiliate_observability"):
+            return {
+                "redirect_events": 0,
+                "book_click_events": 0,
+                "affiliate_tagged_redirects": 0,
+                "affiliate_tagged_book_clicks": 0,
+                "affiliate_link_sources": {},
+                "affiliate_tags": {},
+            }
+        return self.analytics_store.get_affiliate_observability()
 
     def proxy_gmv_rows(self, *, week_start: Optional[str] = None) -> List[Dict[str, Any]]:
         """Return weekly proxy-GMV rows written by economics.compute_weekly_proxy_gmv.
@@ -1023,13 +1120,14 @@ class ShoppingBackend:
         return response
 
     def _attach_short_links(self, recommendations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        if not self.shortener:
-            return recommendations
         enriched: List[Dict[str, Any]] = []
         for item in recommendations:
-            original = item.get("deeplink", "")
+            original, affiliate_source = _affiliate_url_with_source(
+                item.get("deeplink", ""),
+                allowed_hosts=self.allowed_deeplink_hosts,
+            )
             shortened = original
-            if original and validate_deeplink_url(original, self.allowed_deeplink_hosts):
+            if self.shortener and original and validate_deeplink_url(original, self.allowed_deeplink_hosts):
                 try:
                     shortened = self.shortener.shorten(original)
                 except Exception as exc:
@@ -1039,7 +1137,9 @@ class ShoppingBackend:
             enriched.append(
                 {
                     **item,
+                    "deeplink": original,
                     "short_deeplink": shortened,
+                    **_affiliate_observation_metadata(original, affiliate_source),
                 }
             )
         return enriched
@@ -1052,7 +1152,11 @@ class ShoppingBackend:
             return response
         rewritten = []
         for item in data:
-            original = item.get("shortenUrl") or item.get("shortUrl") or item.get("url") or item.get("originalUrl")
+            source_url = item.get("shortenUrl") or item.get("shortUrl") or item.get("url") or item.get("originalUrl")
+            original, affiliate_source = _affiliate_url_with_source(
+                source_url,
+                allowed_hosts=self.allowed_deeplink_hosts,
+            )
             shortened = original
             if original and validate_deeplink_url(original, self.allowed_deeplink_hosts):
                 try:
@@ -1064,10 +1168,36 @@ class ShoppingBackend:
             rewritten.append(
                 {
                     **item,
+                    "shortenUrl": original,
                     "shortenedShareUrl": shortened,
+                    **_affiliate_observation_metadata(original, affiliate_source),
                 }
             )
         return {**response, "data": rewritten}
+
+    def _fallback_deeplink_response(self, urls: List[str], *, degraded_reason: str) -> List[Dict[str, Any]]:
+        rewritten = []
+        for url in urls:
+            original, affiliate_source = _affiliate_url_with_source(
+                str(url),
+                allowed_hosts=self.allowed_deeplink_hosts,
+            )
+            shortened = original
+            if original and self.shortener and validate_deeplink_url(original, self.allowed_deeplink_hosts):
+                try:
+                    shortened = self.shortener.shorten(original)
+                except Exception as exc:
+                    log_event("shortener_error", stage="shorten_fallback_deeplink", error=str(exc))
+            rewritten.append(
+                {
+                    "originalUrl": str(url),
+                    "shortenUrl": original,
+                    "shortenedShareUrl": shortened,
+                    "degraded": degraded_reason,
+                    **_affiliate_observation_metadata(original, affiliate_source),
+                }
+            )
+        return rewritten
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -1086,7 +1216,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _handle_request(self, *, head_only: bool) -> None:
         request_id = generate_request_id()
-        remote_addr = normalize_client_ip(self.client_address[0] if self.client_address else None)
+        remote_addr = _request_remote_addr(self.headers, self.client_address[0] if self.client_address else None)
         try:
             if self.path.startswith("/s/"):
                 slug = self.path.split("/s/", 1)[1].split("?", 1)[0].strip()
@@ -1108,6 +1238,7 @@ class _Handler(BaseHTTPRequestHandler):
                     or _infer_click_source(self.headers.get("Referer", ""))
                 )
                 attribution = self._attribution_context()
+                affiliate_metadata = _affiliate_observation_metadata(target, "redirect_target")
                 try:
                     self.backend.analytics_store.record_event(
                         event_type="book_click",
@@ -1116,6 +1247,7 @@ class _Handler(BaseHTTPRequestHandler):
                             "source": source_tag,
                             "client_id": self._client_id_from_headers(),
                             "referer": (self.headers.get("Referer") or "")[:200],
+                            **affiliate_metadata,
                         },
                         client_ip=client_ip,
                         user_agent=user_agent,
@@ -1135,6 +1267,7 @@ class _Handler(BaseHTTPRequestHandler):
                             "slug": slug,
                             "request_id": request_id,
                             "referer": (self.headers.get("Referer") or "")[:200],
+                            **affiliate_metadata,
                         },
                         client_ip=client_ip,
                         user_agent=user_agent,
@@ -1154,6 +1287,8 @@ class _Handler(BaseHTTPRequestHandler):
                     client_ip=client_ip,
                     user_agent=user_agent,
                     proxy_ip=proxy_ip,
+                    affiliate_tag_present=affiliate_metadata["affiliate_tag_present"],
+                    affiliate_link_source=affiliate_metadata["affiliate_link_source"],
                 )
                 return
             if self.path in ("/health", "/healthz"):
@@ -1179,6 +1314,17 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             split_path = urlsplit(self.path)
             path_only = split_path.path
+            if path_only == "/v1/admin/affiliate-observability":
+                if not _operator_routes_enabled():
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id}, head_only=head_only)
+                    return
+                self._authorize_internal(request_id=request_id, remote_addr=remote_addr)
+                self._send_json(
+                    HTTPStatus.OK,
+                    {**self.backend.affiliate_observability(), "requestId": request_id},
+                    head_only=head_only,
+                )
+                return
             if path_only == "/v1/admin/gmv/proxy":
                 # Admin read-only view of the weekly shortlink proxy-GMV batch output
                 # (spec T5 part 6 / R3.3). The batch itself runs out-of-process — this
@@ -1439,7 +1585,7 @@ class _Handler(BaseHTTPRequestHandler):
         return client_marker
 
     def _pick_rate_limiter(self, *, token: Optional[str], internal: bool):
-        if self.path == "/v1/admin/summary":
+        if self.path in ("/v1/admin/summary", "/v1/admin/affiliate-observability"):
             return self.admin_rate_limiter or self.rate_limiter
         if not internal:
             return self.public_rate_limiter or self.rate_limiter

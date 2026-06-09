@@ -75,7 +75,7 @@ def normalize_product(raw_product: Dict[str, Any]) -> Dict[str, Any]:
     description = raw_product.get("description") or ""
     page_description = raw_product.get("page_description") or ""
     page_snippets = list(raw_product.get("page_snippets") or [])
-    summary = _build_product_summary(description, page_description, page_snippets)
+    summary = _build_product_summary(title, description, page_description, page_snippets)
     return {
         "product_id": str(raw_product.get("product_id") or raw_product.get("productId") or raw_product.get("id") or title),
         "title": title,
@@ -98,6 +98,7 @@ def normalize_product(raw_product: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _build_product_summary(
+    title: str,
     description: str,
     page_description: str,
     page_snippets: List[str],
@@ -116,7 +117,7 @@ def _build_product_summary(
         text = (str(snippet) or "").strip()
         if text:
             return text[:280]
-    return ""
+    return (title or "").strip()[:280]
 
 
 def normalize_request(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -348,12 +349,12 @@ def build_assist_response(
     summary_parts = []
     if best_fit:
         summary_parts.append(_build_summary_lead(best_fit, normalized))
-        if best_fit.get("evidence", {}).get("confidence") == "low":
-            summary_parts.append("현재 후보는 메타데이터 중심 매칭이라 실제 적합성 확인이 더 필요합니다.")
         if best_fit.get("rationale"):
             summary_parts.append(best_fit["rationale"])
     else:
         summary_parts.append("현재 조건으로는 충분히 강한 후보를 찾지 못했습니다")
+
+    conversation_ux = _build_conversation_ux(normalized, recommendations[:3])
 
     return {
         "query_id": query_id,
@@ -361,10 +362,98 @@ def build_assist_response(
         "search_plan": search_plan,
         "best_fit": best_fit,
         "shortlist": recommendations[:3],
+        "conversation_ux": conversation_ux,
         "summary": " ".join(summary_parts),
         "risks": risks,
         "disclosure": DISCLOSURE_TEXT,
     }
+
+
+def _build_conversation_ux(normalized: Dict[str, Any], recommendations: List[Dict[str, Any]]) -> Dict[str, Any]:
+    query = normalized.get("query") or "요청하신 상품"
+    if not recommendations:
+        return {
+            "mode": "number_choice",
+            "message": f"{query} 기준으로 바로 추천할 만한 후보를 찾지 못했습니다. 없으면 '없다'라고 답하면 됩니다.",
+            "choices": [],
+            "reply_hint": "없다",
+        }
+
+    lines = [f"{query} 후보를 찾았습니다."]
+    choices: List[Dict[str, Any]] = []
+    for index, item in enumerate(recommendations, start=1):
+        metrics = _format_choice_metrics(item)
+        reason = _format_choice_reason(item)
+        line = f"{index}. {item.get('title') or '상품명 없음'}"
+        if metrics:
+            line += f"\n   {metrics}"
+        if reason:
+            line += f"\n   이유: {reason}"
+        lines.append(line)
+        choices.append(
+            {
+                "number": index,
+                "product_id": item.get("product_id"),
+                "title": item.get("title"),
+                "price": item.get("price"),
+                "rating": item.get("rating"),
+                "review_count": item.get("review_count"),
+                "reason": reason,
+                "deeplink": item.get("short_deeplink") or item.get("deeplink"),
+            }
+        )
+    lines.append("살만한 게 있으면 번호만 보내주세요. 없으면 '없다'라고 보내면 됩니다.")
+    return {
+        "mode": "number_choice",
+        "message": "\n\n".join(lines),
+        "choices": choices,
+        "reply_hint": "번호만 입력하거나 없다",
+    }
+
+
+def _format_choice_metrics(item: Dict[str, Any]) -> str:
+    metrics: List[str] = []
+    price = item.get("price")
+    if price is not None:
+        metrics.append(f"₩{int(price):,}")
+    rating = item.get("rating")
+    if rating:
+        metrics.append(f"평점 {float(rating):.1f}")
+    review_count = item.get("review_count")
+    if review_count:
+        metrics.append(f"리뷰 {int(review_count):,}개")
+    comparison_label = (item.get("comparison") or {}).get("label")
+    if comparison_label:
+        sort_key = (item.get("comparison") or {}).get("sort_key")
+        if sort_key == "price":
+            metrics.append(f"비교 기준 {comparison_label}")
+        elif sort_key == "rating":
+            metrics.append(f"비교 기준 {comparison_label}")
+        elif sort_key == "review_count":
+            metrics.append(f"비교 기준 {comparison_label}")
+        elif sort_key == "length_m":
+            metrics.append(f"길이 {comparison_label}")
+    return " · ".join(metrics)
+
+
+def _format_choice_reason(item: Dict[str, Any]) -> str:
+    title = str(item.get("title") or "")
+    evidence = item.get("evidence") or {}
+    matched_terms = [str(term) for term in evidence.get("matched_terms") or []]
+    signals = []
+    if matched_terms:
+        signals.append(f"요청어({', '.join(matched_terms[:4])})와 맞음")
+    if item.get("rating") and float(item.get("rating") or 0) >= 4.5:
+        signals.append("평점이 높음")
+    if item.get("review_count") and int(item.get("review_count") or 0) >= 100:
+        signals.append("리뷰 수가 충분함")
+    summary = str(item.get("summary") or "").strip()
+    if summary and summary != title:
+        compact = re.sub(r"\s+", " ", summary)
+        signals.append(compact[:80])
+    if not signals:
+        signals.append("현재 확보된 상품 정보 안에서 가장 조건에 가까움")
+    return ", ".join(signals[:3])
 
 
 def _parse_budget_from_text(text: str) -> Optional[int]:

@@ -245,7 +245,7 @@ class RecommendationTests(unittest.TestCase):
         self.assertEqual(from_snippet["summary"], "스니펫 기반 요약")
 
         when_nothing = normalize_product({"productName": "D"})
-        self.assertEqual(when_nothing["summary"], "")
+        self.assertEqual(when_nothing["summary"], "D")
 
     def test_recommend_products_surfaces_rating_review_and_summary_on_item(self):
         products = [
@@ -268,7 +268,7 @@ class RecommendationTests(unittest.TestCase):
         self.assertEqual(item["review_count"], 945)
         self.assertEqual(item["summary"], "저소음 원룸용 핸디 스틱 청소기")
 
-    def test_build_assist_response_adds_low_confidence_warning(self):
+    def test_build_assist_response_keeps_number_choice_ux_without_evidence_label(self):
         normalized = normalize_request({"query": "무선청소기 추천"})
         recommendations = recommend_products(
             query="무선청소기 추천",
@@ -292,7 +292,11 @@ class RecommendationTests(unittest.TestCase):
             query_id="qid-2",
         )
 
-        self.assertIn("메타데이터 중심 매칭", response["summary"])
+        self.assertNotIn("메타데이터 중심 매칭", response["summary"])
+        self.assertEqual(response["conversation_ux"]["mode"], "number_choice")
+        self.assertIn("번호만 보내주세요", response["conversation_ux"]["message"])
+        self.assertNotIn("근거 수준", response["conversation_ux"]["message"])
+        self.assertEqual(response["conversation_ux"]["choices"][0]["number"], 1)
         self.assertEqual(recommendations[0]["evidence"]["confidence"], "low")
 
 

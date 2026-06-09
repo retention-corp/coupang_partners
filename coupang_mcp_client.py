@@ -14,7 +14,7 @@ from client import CoupangPartnersClient
 
 _DEFAULT_HOSTED_BACKEND = "https://a.retn.kr"
 _PUBLIC_ASSIST_PATH = "/v1/public/assist"
-_HOSTED_CLIENT_ID_DEFAULT = "openclaw-skill"
+_HOSTED_CLIENT_ID_DEFAULT = "coupang-mcp-fallback"
 
 
 def _hosted_client_id() -> str:

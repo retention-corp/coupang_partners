@@ -6,7 +6,7 @@ import unittest
 from urllib import error, request
 
 from analytics import AnalyticsStore
-from backend import _Handler, ShoppingBackend, build_server, serve_in_thread
+from backend import _Handler, ShoppingBackend, _request_remote_addr, build_server, serve_in_thread
 from security import RateLimiter
 
 
@@ -185,8 +185,15 @@ class BackendTests(unittest.TestCase):
             opener.open(f"{self.base_url}/s/{slug}", timeout=5)
         response = ctx.exception
         self.assertEqual(response.code, 302)
-        self.assertEqual(response.headers["Location"], "https://www.coupang.com/vp/products/1")
+        self.assertEqual(response.headers["Location"], "https://www.coupang.com/vp/products/1?lptag=AF3727577")
         response.close()
+
+        observability = json.loads(
+            request.urlopen(f"{self.base_url}/v1/admin/affiliate-observability", timeout=5).read().decode("utf-8")
+        )
+        self.assertEqual(observability["redirect_events"], 1)
+        self.assertEqual(observability["affiliate_tagged_redirects"], 1)
+        self.assertGreaterEqual(observability["affiliate_tags"]["AF3727577"], 1)
 
     def test_assist_requires_bearer_token_when_configured(self):
         os.environ["OPENCLAW_SHOPPING_API_TOKENS"] = "token-123"
@@ -264,6 +271,10 @@ class BackendTests(unittest.TestCase):
         response = ctx.exception
         self.assertEqual(response.code, 429)
         response.close()
+
+    def test_request_remote_addr_prefers_forwarded_client_ip(self):
+        headers = {"X-Forwarded-For": "203.0.113.10, 169.254.169.126"}
+        self.assertEqual(_request_remote_addr(headers, "169.254.169.126"), "203.0.113.10")
 
     def test_allowlist_blocks_unknown_client(self):
         os.environ["OPENCLAW_SHOPPING_CLIENT_ALLOWLIST_ENABLED"] = "true"
@@ -388,7 +399,30 @@ class BackendTests(unittest.TestCase):
             shortener=FailingShortener(),
         )
         response = backend.assist({"query": "30만원 이하 무선청소기"})
-        self.assertEqual(response["best_fit"]["short_deeplink"], "https://www.coupang.com/vp/products/1")
+        self.assertEqual(response["best_fit"]["short_deeplink"], "https://www.coupang.com/vp/products/1?lptag=AF3727577")
+        self.assertEqual(response["best_fit"]["affiliate_link_source"], "fallback_lptag")
+        self.assertTrue(response["best_fit"]["affiliate_tag_present"])
+
+    def test_deeplinks_falls_back_to_lptag_when_api_is_rate_limited(self):
+        from client import CoupangApiError
+
+        class RateLimitedDeeplinkAdapter(FakeAdapter):
+            def deeplink(self, urls):
+                raise CoupangApiError(429, {"rCode": "ERROR", "rMessage": "rate limited"})
+
+        backend = ShoppingBackend(
+            adapter=RateLimitedDeeplinkAdapter(),
+            analytics_store=AnalyticsStore(f"{self.tempdir.name}/deeplink-fallback.sqlite3"),
+            shortener=self.server.RequestHandlerClass.backend.shortener,
+        )
+        response = backend.deeplinks({"urls": ["https://www.coupang.com/vp/products/1?itemId=2"]})
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["degraded"], "coupang_api_status_429")
+        item = response["data"][0]
+        self.assertIn("lptag=AF3727577", item["shortenUrl"])
+        self.assertTrue(item["shortenedShareUrl"].startswith("https://go.example.com/s/"))
+        self.assertEqual(item["affiliate_link_source"], "fallback_lptag")
 
     def test_assist_degrades_gracefully_on_coupang_api_error(self):
         from client import CoupangApiError

@@ -47,48 +47,11 @@ Operators should be able to inspect:
 - evidence-ingestion counts
 - basic recent usage summaries
 
-## Data model guidance
+Production posture:
 
-The approved MVP keeps sqlite support for local reversibility, but production
-can now use Firestore for both analytics and short-link state when the backend
-runs on Cloud Run.
-
-Suggested tables from the PRD:
-
-- `queries`
-- `recommendations`
-- `events`
-- `evidence_snippets`
-- `short_links` only for the local builtin shortener
-
-Store enough context to improve later ranking without storing unnecessary secrets or opaque blobs by default.
-
-## Evidence policy
-
-Evidence should stay conservative and auditable.
-
-Good evidence sources:
-
-- product metadata returned by Coupang
-- user-supplied snippets
-- operator-reviewed HTML snapshots
-- prior interaction/outcome summaries already captured by the backend
-
-Avoid implying that the system has reviewed hidden or unavailable data when it only has weak evidence.
-
-## Public skill boundary
-
-The public skill package should never contain:
-
-- `COUPANG_ACCESS_KEY`
-- `COUPANG_SECRET_KEY`
-- embedded backend operator secrets
-
-The public skill package should contain:
-
-- the hosted backend contract
-- user-visible prompts for query/budget/preferences
-- clear disclosure that recommendations come from a hosted operator backend
+- Keep operator routes disabled by default on the public Cloud Run service.
+- Run a separate operator Cloud Run service for stable internal/admin traffic.
+- Only enable public-service operator routes temporarily for an authenticated validation window, then redeploy with them disabled again.
 
 ## CLI bridge
 
@@ -97,24 +60,26 @@ This repo also includes a thin CLI entrypoint at `bin/openclaw_shopping.py` for 
 Recommended environment variables:
 
 - `OPENCLAW_SHOPPING_BASE_URL`
+- `OPENCLAW_SHOPPING_OPERATOR_BASE_URL`
 - `OPENCLAW_SHOPPING_TIMEOUT_SECONDS`
 
-## Operator checklist
+## Stable split-service production setup
 
-1. Configure backend-only Coupang credentials.
-2. Publish the backend at a stable base URL.
-3. Expose only the documented public endpoints.
-4. Add affiliate disclosure anywhere recommendations are published to end users.
-5. Set `OPENCLAW_SHOPPING_SHORTENER=firestore` for production so short links survive instance replacement.
-6. Set `OPENCLAW_SHOPPING_ANALYTICS_PROVIDER=firestore` for production so admin summaries survive instance replacement.
-7. Review evidence ingestion and logging retention before broad rollout.
+Public service:
 
-## Manual smoke test checklist
+```bash
+bash scripts/deploy_gcp_cloud_run.sh
+```
 
-1. Start the backend locally or in a staging environment.
-2. Call `GET /health` and confirm machine-readable JSON.
-3. Submit a sample `POST /v1/assist` request with a realistic shopping query.
-4. Confirm the response includes recommendations, rationale, risks, and deeplinks.
-5. Emit a sample `POST /v1/events` payload.
-6. Inspect admin summary output and confirm `total_short_links` is populated by the active shortener provider.
-7. Verify the public skill docs do not reveal secrets.
+Operator service:
+
+```bash
+bash scripts/deploy_gcp_cloud_run_operator.sh
+```
+
+Operator clients should use the operator service URL for internal calls:
+
+```bash
+export OPENCLAW_SHOPPING_OPERATOR_BASE_URL="$(gcloud run services describe a-retn-shortener-ops --project retn-kr-website --region us-central1 --format='value(status.url)')"
+export OPENCLAW_SHOPPING_USE_INTERNAL_API="true"
+```

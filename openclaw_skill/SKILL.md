@@ -45,6 +45,7 @@ Hosted shopping copilot for OpenClaw.
 - Closed beta traffic is pinned to `https://a.retn.kr` unless the operator explicitly enables `OPENCLAW_SHOPPING_ALLOW_NON_PROD_BACKEND=true`.
 - Public skill traffic should use the hosted public gateway path without requiring an operator bearer token.
 - When the operator explicitly enables `OPENCLAW_SHOPPING_USE_INTERNAL_API=true`, this skill should send `OPENCLAW_SHOPPING_API_TOKEN` as a bearer token.
+- In stable production, internal traffic should prefer `OPENCLAW_SHOPPING_OPERATOR_BASE_URL` over `OPENCLAW_SHOPPING_BASE_URL` so operator calls use the dedicated operator service.
 - When returning recommendations, preserve the affiliate disclosure text.
 - When returning recommendations, always include the action-ready affiliate link for each recommended item. Prefer `short_deeplink`, then `deeplink`.
 
@@ -128,6 +129,7 @@ Route based on intent first:
 2. For search: extract keyword, rocket preference, price ceiling, and sort intent from the user’s text.
 3. For recommend: ask for constraints if missing (budget, use case, size).
 4. Prefer the hosted backend from `OPENCLAW_SHOPPING_BASE_URL`; default is `https://a.retn.kr`.
+For authenticated internal flows, prefer `OPENCLAW_SHOPPING_OPERATOR_BASE_URL` when it is set.
 5. Always include `short_deeplink` (prefer over `deeplink`) for each result.
 6. If the user asks for books or taste-sensitive products, use `recommend` and personalize within the shopping flow.
 7. For book requests (책/도서/사서 추천/베스트셀러), add `"vertical": "book"` to the assist payload. The backend runs book_reco (사서추천도서 + Data4Library + Naver) and maps recommendations to Coupang products; titles without a Coupang match are dropped rather than fabricated.
@@ -142,6 +144,8 @@ Route based on intent first:
 - `쿠팡에서 AUX 선 제일 긴거 찾아줘`
 - `쿠팡에서 3.5mm 연장선 긴 거 보여줘`
 - `쿠팡에서 제일 싼 무선 마우스 찾아줘`
+- `쿠팡에서 로켓배송 되는 생수만 보여줘`
+- `쿠팡에서 전자제품 베스트 보여줘`
 - `무선청소기 추천해줘`
 - `머리가 큰 사람도 고통 없이 쓸 수 있는 미세먼지 마스크 찾아줘`
 - `대두가 써도 안 아픈 KF94 마스크 추천해줘`

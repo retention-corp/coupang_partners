@@ -2,9 +2,11 @@ __pycache__/
 *.py[cod]
 .env
 .env.*
+!.env.example
 .omx/
 .omc/
-.claude/
+.claude/settings.local.json
+.claude/cache/
 .data/
 *.sqlite3
 .DS_Store
