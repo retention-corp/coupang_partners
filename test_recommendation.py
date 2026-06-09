@@ -143,6 +143,51 @@ class RecommendationTests(unittest.TestCase):
         self.assertEqual(len(recommendations), 1)
         self.assertEqual(recommendations[0]["product_id"], "2")
 
+    def test_recommend_products_does_not_fallback_to_wrong_product_type(self):
+        products = [
+            {
+                "productId": 1,
+                "productName": "200W 휴대용 블루투스 스피커",
+                "productPrice": 23750,
+                "productUrl": "https://example.com/1",
+                "categoryName": "가전디지털",
+                "keyword": "3만원 이하 무선 마우스 추천",
+            },
+            {
+                "productId": 2,
+                "productName": "저소음 무선 마우스",
+                "productPrice": 12900,
+                "productUrl": "https://example.com/2",
+                "categoryName": "가전디지털",
+            },
+        ]
+
+        recommendations = recommend_products(
+            query="3만원 이하 무선 마우스 추천",
+            products=products,
+            budget=30000,
+        )
+
+        self.assertEqual(len(recommendations), 1)
+        self.assertEqual(recommendations[0]["product_id"], "2")
+
+    def test_recommend_products_returns_empty_when_no_product_type_matches(self):
+        recommendations = recommend_products(
+            query="3만원 이하 무선 마우스 추천",
+            products=[
+                {
+                    "productId": 1,
+                    "productName": "200W 휴대용 블루투스 스피커",
+                    "productPrice": 23750,
+                    "productUrl": "https://example.com/1",
+                    "keyword": "3만원 이하 무선 마우스 추천",
+                }
+            ],
+            budget=30000,
+        )
+
+        self.assertEqual(recommendations, [])
+
     def test_normalize_request_detects_extremum_search_and_cleans_query(self):
         normalized = normalize_request({"query": "쿠팡에서 AUX 선 제일 긴거 제품 찾아줘"})
 

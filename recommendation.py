@@ -44,6 +44,40 @@ _QUERY_MUST_HAVE_RULES = (
     ("aux", ["aux"]),
     ("3.5mm", ["3.5mm"]),
 )
+_QUERY_RELEVANCE_STOPWORDS = {
+    "추천",
+    "추천해줘",
+    "찾아줘",
+    "검색",
+    "검색해줘",
+    "보여줘",
+    "골라줘",
+    "알려줘",
+    "이하",
+    "이상",
+    "미만",
+    "초과",
+    "만원",
+    "원",
+    "쿠팡",
+    "로켓",
+    "배송",
+    "무료배송",
+    "저렴한",
+    "싼",
+    "가성비",
+    "좋은",
+}
+_QUERY_RELEVANCE_MODIFIERS = {
+    "무선",
+    "유선",
+    "저소음",
+    "원룸",
+    "소형",
+    "대형",
+    "미니",
+    "휴대용",
+}
 
 
 def _coerce_int(value: Any) -> Optional[int]:
@@ -246,6 +280,7 @@ def recommend_products(
     gated_recommendations: List[Dict[str, Any]] = []
     fallback_recommendations: List[Dict[str, Any]] = []
     inferred_query_terms = _infer_must_have_terms(query)
+    required_query_terms = inferred_query_terms or _required_relevance_terms(query)
     for raw_product in products:
         product = normalize_product(raw_product)
         if budget is not None and product["price"] is not None and product["price"] > budget * 1.25:
@@ -292,11 +327,12 @@ def recommend_products(
             intent_type=intent_type,
             comparison_value=comparison_value,
             inferred_query_terms=inferred_query_terms,
+            required_query_terms=required_query_terms,
         ):
             gated_recommendations.append(recommendation)
         fallback_recommendations.append(recommendation)
 
-    recommendations = gated_recommendations or fallback_recommendations
+    recommendations = gated_recommendations or ([] if required_query_terms else fallback_recommendations)
     if intent_type == INTENT_EXTREMUM_SEARCH and sort_key:
         _sort_extremum_recommendations(recommendations, sort_key, sort_direction or "desc")
     else:
@@ -310,6 +346,7 @@ def _passes_generic_relevance_gate(
     intent_type: str,
     comparison_value: Optional[float],
     inferred_query_terms: Optional[List[str]] = None,
+    required_query_terms: Optional[List[str]] = None,
 ) -> bool:
     evidence = recommendation.get("evidence", {})
     matched_terms = evidence.get("matched_terms") or []
@@ -317,6 +354,10 @@ def _passes_generic_relevance_gate(
     listing_facts = " ".join(evidence.get("facts") or [])
     has_listing_signal = "Listing signals:" in listing_facts
     title = str(recommendation.get("title") or "").lower()
+    searchable_text = _recommendation_searchable_text(recommendation)
+
+    if required_query_terms and not any(term.lower() in searchable_text for term in required_query_terms):
+        return False
 
     if matched_terms:
         return True
@@ -329,6 +370,35 @@ def _passes_generic_relevance_gate(
     if intent_type == INTENT_EXTREMUM_SEARCH and comparison_value is not None:
         return True
     return False
+
+
+def _required_relevance_terms(query: str) -> List[str]:
+    tokens = re.findall(r"[\w가-힣]+", _clean_search_query(query).lower())
+    required: List[str] = []
+    for token in tokens:
+        if len(token) <= 1:
+            continue
+        if any(char.isdigit() for char in token):
+            continue
+        if token in _QUERY_RELEVANCE_STOPWORDS or token in _QUERY_RELEVANCE_MODIFIERS:
+            continue
+        required.append(token)
+    return list(dict.fromkeys(required))
+
+
+def _recommendation_searchable_text(recommendation: Dict[str, Any]) -> str:
+    metadata = recommendation.get("metadata") or {}
+    fields = [
+        recommendation.get("title"),
+        recommendation.get("summary"),
+        recommendation.get("description"),
+        recommendation.get("page_title"),
+        recommendation.get("page_description"),
+        metadata.get("productName"),
+        metadata.get("categoryName"),
+    ]
+    fields.extend(recommendation.get("page_snippets") or [])
+    return " ".join(str(value).lower() for value in fields if str(value or "").strip())
 
 
 def build_assist_response(
