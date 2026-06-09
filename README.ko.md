@@ -79,19 +79,29 @@ python3 backend.py
 
 이 경로는 운영자 전용입니다. 공개 사용자 기본 경로로 안내하면 안 됩니다.
 
-### 공개 엔드포인트
+### 공개 엔드포인트 (tokenless, production 노출)
 
 - `GET /health`
 - `POST /v1/public/assist`
+- `POST /v1/public/search`
+- `POST /v1/public/goldbox`
+- `GET /v1/public/best/{category_id}`
+- `GET /s/{slug}`
 
 ### 보호된 엔드포인트
 
-다음 경로는 운영자/내부 경로이며 bearer token이 필요합니다.
+다음 경로는 운영자/내부 경로이며 bearer token이 필요합니다. `OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES=true`가 설정되지 않은 배포(프로덕션 기본값)에서는 `404 Not Found`를 반환합니다.
 
 - `POST /internal/v1/assist`
 - `POST /internal/v1/events`
 - `POST /internal/v1/deeplinks`
 - `GET /v1/admin/summary`
+
+### 프로덕션 운영 메모
+
+- 공개 프로덕션은 `a-retn-shortener` / `https://a.retn.kr` 로 유지하고 `OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES=false`를 기본값으로 둡니다.
+- 안정적인 운영자 트래픽은 별도 Cloud Run 서비스 `a-retn-shortener-ops` 로 보내고, 이 서비스는 `OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES=true`를 유지합니다.
+- 공개 서비스에서 operator route를 열었다 닫는 방식은 일회성 검증용으로만 사용합니다.
 
 선택적으로 `X-OpenClaw-Client-Id`를 함께 보낼 수 있습니다.
 
@@ -100,8 +110,10 @@ python3 backend.py
 - 공개 클라이언트는 기본적으로 token 없이 `https://a.retn.kr`의 public path를 사용합니다.
 - 운영자 전용 내부 호출에서는 `OPENCLAW_SHOPPING_API_TOKEN` 또는 `OPENCLAW_SHOPPING_API_TOKENS`를 사용할 수 있습니다.
 - `OPENCLAW_SHOPPING_BASE_URL`, `OPENCLAW_SHOPPING_BACKEND_URL`, `SHOPPING_COPILOT_BASE_URL`를 지원합니다.
+- internal/operator 호출용으로 `OPENCLAW_SHOPPING_OPERATOR_BASE_URL`, `OPENCLAW_SHOPPING_OPERATOR_BACKEND_URL`도 지원합니다.
 - 기본 beta/public 경로에서는 stale한 localhost override가 있어도 `https://a.retn.kr`로 정규화됩니다. 예외는 `OPENCLAW_SHOPPING_ALLOW_NON_PROD_BACKEND=true`를 명시한 경우뿐입니다.
 - `/internal/v1/*`를 직접 호출해야 하는 운영자/스테이징 플로우에서는 `OPENCLAW_SHOPPING_USE_INTERNAL_API=true`를 설정합니다.
+- 안정적인 프로덕션 구성에서는 `OPENCLAW_SHOPPING_OPERATOR_BASE_URL`를 `a-retn-shortener-ops` URL로 설정합니다.
 
 ### 기본 보호 장치
 
@@ -121,6 +133,7 @@ export OPENCLAW_SHOPPING_PUBLIC_BASE_URL="https://go.example.com"
 비로컬 host로 internal/operator flow를 테스트할 때는 아래를 함께 설정합니다.
 
 ```bash
+export OPENCLAW_SHOPPING_OPERATOR_BASE_URL="$(gcloud run services describe a-retn-shortener-ops --project retn-kr-website --region us-central1 --format='value(status.url)')"
 export OPENCLAW_SHOPPING_API_TOKEN="replace-with-random-long-token"
 export OPENCLAW_SHOPPING_USE_INTERNAL_API="true"
 ```
@@ -177,7 +190,7 @@ python3 bin/openclaw_shopping.py \
 운영자 전용 internal 예시:
 
 ```bash
-export OPENCLAW_SHOPPING_BASE_URL="https://a.retn.kr"
+export OPENCLAW_SHOPPING_OPERATOR_BASE_URL="$(gcloud run services describe a-retn-shortener-ops --project retn-kr-website --region us-central1 --format='value(status.url)')"
 export OPENCLAW_SHOPPING_API_TOKEN="replace-with-random-long-token"
 export OPENCLAW_SHOPPING_USE_INTERNAL_API="true"
 
@@ -194,6 +207,14 @@ python3 bin/openclaw_shopping.py "30만원 이하 무선청소기, 원룸용"
 4. Coupang affiliate secret을 클라이언트에 요청하거나 노출하지 않는다.
 
 자세한 public contract는 [openclaw_skill/README.md](openclaw_skill/README.md)를 참고하세요.
+
+짧은 사용 예시:
+
+- `쿠팡에서 3만원 이하 무선 마우스 추천해줘`
+- `쿠팡에서 로켓배송 되는 생수만 보여줘`
+- `쿠팡에서 AUX 선 제일 긴 거 찾아줘`
+- `쿠팡에서 전자제품 베스트 보여줘`
+- `쿠팡에서 요즘 볼만한 자기계발서 3개만 골라줘`
 
 ## 컴플라이언스 / 제품 가드레일
 

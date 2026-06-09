@@ -54,6 +54,25 @@ class OpenClawSkillTests(unittest.TestCase):
                 "https://a.retn.kr",
             )
 
+    def test_skill_prefers_operator_base_url_for_internal_api(self):
+        script_globals = self._load_script_globals()
+        with mock.patch.dict(
+            os.environ,
+            {
+                "OPENCLAW_SHOPPING_USE_INTERNAL_API": "true",
+                "OPENCLAW_SHOPPING_OPERATOR_BASE_URL": "https://a-retn-shortener-ops-12345.us-central1.run.app",
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                script_globals["_backend_base_url"](),
+                "https://a-retn-shortener-ops-12345.us-central1.run.app",
+            )
+            self.assertEqual(
+                script_globals["_normalize_backend_base_url"]("https://a-retn-shortener-ops-12345.us-central1.run.app"),
+                "https://a-retn-shortener-ops-12345.us-central1.run.app",
+            )
+
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self._saved_env = {

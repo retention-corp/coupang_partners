@@ -66,7 +66,9 @@ def build_evidence(product: Dict[str, Any], query: str, snippets: Optional[Itera
         risks.append("Metadata-only evidence makes product fit uncertain.")
     elif confidence == "medium":
         risks.append("Evidence is partial, so final fit should be validated before publishing.")
-    if review_count < 20:
+    if review_count <= 0:
+        risks.append("Upstream metadata did not provide rating or review-count evidence.")
+    elif review_count < 20:
         risks.append("Limited review history reduces confidence.")
     if rating and rating < 4.0:
         risks.append("Average rating is below the preferred threshold.")

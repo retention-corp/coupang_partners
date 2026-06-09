@@ -5,6 +5,7 @@ from unittest import mock
 from urllib import error
 
 from coupang_partners import CoupangApiError, CoupangPartnersClient
+from client import CoupangUpstreamRateGuard
 
 
 class DummyResponse:
@@ -126,6 +127,42 @@ class CoupangPartnersClientTests(unittest.TestCase):
                 "user": {"puid": "user-1"},
             },
         )
+
+    def test_local_rate_guard_blocks_before_upstream_call(self):
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "COUPANG_UPSTREAM_RATE_LIMIT_ENABLED": "true",
+                "COUPANG_UPSTREAM_LIMIT_ALL_PER_MINUTE": "1",
+                "COUPANG_UPSTREAM_LIMIT_SEARCH_PER_MINUTE": "1",
+                "COUPANG_UPSTREAM_COOLDOWN_SECONDS": "0",
+            },
+        ):
+            guarded = CoupangPartnersClient(
+                access_key="test-access",
+                secret_key="test-secret",
+                rate_guard=CoupangUpstreamRateGuard(),
+            )
+
+        def opener(req, timeout):
+            return DummyResponse({"rCode": "0", "data": []})
+
+        guarded.request(
+            "GET",
+            "/v2/providers/affiliate_open_api/apis/openapi/v1/products/search",
+            query={"keyword": "first"},
+            opener=opener,
+        )
+        with self.assertRaises(CoupangApiError) as ctx:
+            guarded.request(
+                "GET",
+                "/v2/providers/affiliate_open_api/apis/openapi/v1/products/search",
+                query={"keyword": "second"},
+                opener=opener,
+            )
+
+        self.assertEqual(ctx.exception.status_code, 429)
+        self.assertEqual(ctx.exception.payload["rCode"], "LOCAL_RATE_LIMIT")
 
 
 if __name__ == "__main__":

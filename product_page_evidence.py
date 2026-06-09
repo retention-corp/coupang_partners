@@ -207,6 +207,16 @@ def build_product_page_url(product: Dict[str, Any]) -> Optional[str]:
         return None
     parsed = parse.urlparse(raw_url)
     host = (parsed.hostname or "").lower()
+    if host == "link.coupang.com":
+        query = parse.parse_qs(parsed.query or "")
+        page_key = (query.get("pageKey") or [None])[0]
+        item_id = (query.get("itemId") or [None])[0]
+        vendor_item_id = (query.get("vendorItemId") or [None])[0]
+        if page_key and item_id and vendor_item_id:
+            return (
+                f"https://www.coupang.com/vp/products/{page_key}"
+                f"?itemId={item_id}&vendorItemId={vendor_item_id}"
+            )
     # link.coupang.com is the affiliate-redirect host. Allow it here so the fetch step
     # can follow the 302 to the canonical www.coupang.com product page — the post-fetch
     # `parsed_final` check still enforces coupang.com as the final host, so a hijacked

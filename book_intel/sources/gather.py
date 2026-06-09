@@ -7,6 +7,7 @@ Aladin. The output is the shape the OpenClaw composer prompt templates consume.
 
 from __future__ import annotations
 
+import datetime as _dt
 import logging
 from typing import Any, Optional
 
@@ -51,6 +52,7 @@ def gather_book_intel(
         "naver": naver_block,
         "coupang": coupang_block,
         "youtube": youtube_block,
+        "context": {"today": _dt.date.today().isoformat()},
     }
 
 

@@ -143,6 +143,51 @@ class RecommendationTests(unittest.TestCase):
         self.assertEqual(len(recommendations), 1)
         self.assertEqual(recommendations[0]["product_id"], "2")
 
+    def test_recommend_products_does_not_fallback_to_wrong_product_type(self):
+        products = [
+            {
+                "productId": 1,
+                "productName": "200W 휴대용 블루투스 스피커",
+                "productPrice": 23750,
+                "productUrl": "https://example.com/1",
+                "categoryName": "가전디지털",
+                "keyword": "3만원 이하 무선 마우스 추천",
+            },
+            {
+                "productId": 2,
+                "productName": "저소음 무선 마우스",
+                "productPrice": 12900,
+                "productUrl": "https://example.com/2",
+                "categoryName": "가전디지털",
+            },
+        ]
+
+        recommendations = recommend_products(
+            query="3만원 이하 무선 마우스 추천",
+            products=products,
+            budget=30000,
+        )
+
+        self.assertEqual(len(recommendations), 1)
+        self.assertEqual(recommendations[0]["product_id"], "2")
+
+    def test_recommend_products_returns_empty_when_no_product_type_matches(self):
+        recommendations = recommend_products(
+            query="3만원 이하 무선 마우스 추천",
+            products=[
+                {
+                    "productId": 1,
+                    "productName": "200W 휴대용 블루투스 스피커",
+                    "productPrice": 23750,
+                    "productUrl": "https://example.com/1",
+                    "keyword": "3만원 이하 무선 마우스 추천",
+                }
+            ],
+            budget=30000,
+        )
+
+        self.assertEqual(recommendations, [])
+
     def test_normalize_request_detects_extremum_search_and_cleans_query(self):
         normalized = normalize_request({"query": "쿠팡에서 AUX 선 제일 긴거 제품 찾아줘"})
 
@@ -245,7 +290,7 @@ class RecommendationTests(unittest.TestCase):
         self.assertEqual(from_snippet["summary"], "스니펫 기반 요약")
 
         when_nothing = normalize_product({"productName": "D"})
-        self.assertEqual(when_nothing["summary"], "")
+        self.assertEqual(when_nothing["summary"], "D")
 
     def test_recommend_products_surfaces_rating_review_and_summary_on_item(self):
         products = [
@@ -268,7 +313,7 @@ class RecommendationTests(unittest.TestCase):
         self.assertEqual(item["review_count"], 945)
         self.assertEqual(item["summary"], "저소음 원룸용 핸디 스틱 청소기")
 
-    def test_build_assist_response_adds_low_confidence_warning(self):
+    def test_build_assist_response_keeps_number_choice_ux_without_evidence_label(self):
         normalized = normalize_request({"query": "무선청소기 추천"})
         recommendations = recommend_products(
             query="무선청소기 추천",
@@ -292,7 +337,11 @@ class RecommendationTests(unittest.TestCase):
             query_id="qid-2",
         )
 
-        self.assertIn("메타데이터 중심 매칭", response["summary"])
+        self.assertNotIn("메타데이터 중심 매칭", response["summary"])
+        self.assertEqual(response["conversation_ux"]["mode"], "number_choice")
+        self.assertIn("번호만 보내주세요", response["conversation_ux"]["message"])
+        self.assertNotIn("근거 수준", response["conversation_ux"]["message"])
+        self.assertEqual(response["conversation_ux"]["choices"][0]["number"], 1)
         self.assertEqual(recommendations[0]["evidence"]["confidence"], "low")
 
 

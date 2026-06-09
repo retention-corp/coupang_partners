@@ -33,6 +33,15 @@ CATEGORY_MAP = {
 
 
 def _backend_base_url():
+    if _use_internal_api():
+        return (
+            os.getenv("OPENCLAW_SHOPPING_OPERATOR_BASE_URL")
+            or os.getenv("OPENCLAW_SHOPPING_OPERATOR_BACKEND_URL")
+            or os.getenv("OPENCLAW_SHOPPING_BASE_URL")
+            or os.getenv("OPENCLAW_SHOPPING_BACKEND_URL")
+            or os.getenv("SHOPPING_COPILOT_BASE_URL")
+            or DEFAULT_HOSTED_BACKEND
+        )
     return (
         os.getenv("OPENCLAW_SHOPPING_BASE_URL")
         or os.getenv("OPENCLAW_SHOPPING_BACKEND_URL")
@@ -55,6 +64,8 @@ def _allowed_backend_hosts():
     env_hosts = (os.getenv("OPENCLAW_SHOPPING_ALLOWED_BACKEND_HOSTS") or "").strip()
     hosts = [host.strip().lower() for host in env_hosts.split(",") if host.strip()]
     hosts.extend(["a.retn.kr", "127.0.0.1", "localhost"])
+    if _use_internal_api():
+        hosts.append("run.app")
     return tuple(dict.fromkeys(hosts))
 
 
@@ -79,8 +90,13 @@ def _normalize_backend_base_url(url: str) -> str:
     except ValueError:
         return DEFAULT_HOSTED_BACKEND
 
-    if parsed.scheme == "https" and (parsed.hostname or "").lower() == "a.retn.kr":
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme == "https" and host == "a.retn.kr":
         return candidate.rstrip("/")
+    if _use_internal_api() and parsed.scheme == "https":
+        allowed_hosts = _allowed_backend_hosts()
+        if any(host == allowed or host.endswith(f".{allowed}") for allowed in allowed_hosts):
+            return candidate.rstrip("/")
     return DEFAULT_HOSTED_BACKEND
 
 

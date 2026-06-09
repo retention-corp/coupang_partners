@@ -44,7 +44,7 @@ class ComposerSuccessTests(unittest.TestCase):
             post = compose_post(self.raw, tier="A")
         self.assertEqual(post["title"], "솔로 운영자의 세이노 읽기")
         self.assertEqual(post["tier"], "A")
-        self.assertEqual(post["prompt_variant"], "blog_a_tier")
+        self.assertEqual(post["prompt_variant"], "canvas_a_tier")
         self.assertIn("도서추천", post["tags"])  # prefix inserted
         self.assertIn("쿠팡파트너스", post["tags"])
         patched.assert_called_once()
@@ -59,7 +59,7 @@ class ComposerSuccessTests(unittest.TestCase):
         with mock.patch.object(subprocess, "run", return_value=completed):
             post = compose_post(self.raw, tier="b")
         self.assertEqual(post["tier"], "B")
-        self.assertEqual(post["prompt_variant"], "blog_b_tier")
+        self.assertEqual(post["prompt_variant"], "canvas_b_tier")
 
     def test_code_fences_are_stripped(self) -> None:
         inner = {"title": "제목", "lead": "요약", "body": "본문"}
@@ -85,6 +85,55 @@ class ComposerSuccessTests(unittest.TestCase):
         with mock.patch.object(subprocess, "run", return_value=completed):
             post = compose_post(self.raw, tier="A")
         self.assertEqual(post["title"], "제목")
+
+    def test_canvas_fields_are_preserved(self) -> None:
+        """Full Canvas payload round-trips through _finalize with all optional fields."""
+
+        inner = {
+            "definition_lead": "집중을 환경 문제로 뒤집는 책.",
+            "title": "제목",
+            "subtitle": "서브",
+            "lead": "리드",
+            "body": "본문 " * 200,
+            "pros": ["깊이", "가독성"],
+            "cons": ["느린 전개"],
+            "key_takeaways": ["포인트1", "포인트2"],
+            "comparisons": ["X보다 Y한 책"],
+            "target_reader": ["엔지니어"],
+            "not_for": ["빠른 팁 찾는 독자"],
+            "actionable_exercise": "48시간 실험: 알림 끄기",
+            "timely_hook": "2026년 지금 읽기 좋은 이유",
+            "faq": [{"q": "질문?", "a": "답변."}],
+            "youtube_short": {"hook_3s": "h", "body_45s": "b", "cta_5s": "c", "description": "d", "tags": ["t"]},
+            "newsletter_snippet": "뉴스레터 문구",
+            "thread_tweets": ["tweet1", "tweet2"],
+            "schema_jsonld": {"@context": "https://schema.org", "@type": "Review"},
+            "faq_jsonld": {"@context": "https://schema.org", "@type": "FAQPage"},
+            "internal_link_seeds": ["링크 시드"],
+            "tags": ["태그"],
+        }
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=_stdout_wrapper(json.dumps(inner, ensure_ascii=False)), stderr="")
+        with mock.patch.object(subprocess, "run", return_value=completed):
+            post = compose_post(self.raw, tier="A")
+        self.assertEqual(post["definition_lead"], "집중을 환경 문제로 뒤집는 책.")
+        self.assertEqual(post["pros"], ["깊이", "가독성"])
+        self.assertEqual(post["faq"][0]["q"], "질문?")
+        self.assertIn("canvas", post)
+        self.assertEqual(post["canvas"]["newsletter_snippet"], "뉴스레터 문구")
+        self.assertEqual(post["canvas"]["youtube_short"]["hook_3s"], "h")
+        self.assertEqual(post["schema_jsonld"]["@type"], "Review")
+
+    def test_insufficient_signal_refusal_raises(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=_stdout_wrapper(json.dumps({"error": "insufficient_signal"})),
+            stderr="",
+        )
+        with mock.patch.object(subprocess, "run", return_value=completed):
+            with self.assertRaises(CompositionError) as ctx:
+                compose_post(self.raw, tier="A")
+        self.assertIn("insufficient_signal", str(ctx.exception))
 
 
 class ComposerFailureTests(unittest.TestCase):

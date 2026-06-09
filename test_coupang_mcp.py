@@ -141,6 +141,11 @@ class CoupangMcpHostedFallbackTests(unittest.TestCase):
         self.assertEqual(result[0]["productPrice"], 5000)
         self.assertEqual(result[0]["productUrl"], "https://a.retn.kr/s/abc")
 
+    def test_hosted_fallback_defaults_to_coupang_mcp_client_id(self):
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(_HostedAssistClient()._base_url, "https://a.retn.kr")
+            self.assertEqual(__import__("coupang_mcp_client")._hosted_client_id(), "coupang-mcp-fallback")
+
     def test_rocket_filters_hosted_results_by_metadata_isRocket(self):
         with self._patch_urlopen(_SAMPLE_ITEMS):
             client = CoupangMcpClient()

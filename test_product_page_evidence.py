@@ -76,6 +76,19 @@ class ProductPageEvidenceTests(unittest.TestCase):
             "https://link.coupang.com/re/AFFSDP?lptag=AF0000000&subid=abc",
         )
 
+    def test_build_product_page_url_extracts_canonical_fields_from_affiliate_query(self):
+        product = {
+            "productUrl": (
+                "https://link.coupang.com/re/AFFSDP?lptag=AF0000000"
+                "&pageKey=7551562122&itemId=19874489288&vendorItemId=79840900617"
+            ),
+        }
+
+        self.assertEqual(
+            build_product_page_url(product),
+            "https://www.coupang.com/vp/products/7551562122?itemId=19874489288&vendorItemId=79840900617",
+        )
+
     def test_fetch_product_page_evidence_extracts_title_description_and_snippets(self):
         product = {
             "metadata": {

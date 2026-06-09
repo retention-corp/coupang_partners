@@ -25,6 +25,32 @@ class FakeAdapter:
             }
         }
 
+    def get_goldbox(self):
+        return {
+            "data": {
+                "productData": [
+                    {
+                        "productId": 777,
+                        "productName": "골드박스 테스트 상품",
+                        "productUrl": "https://www.coupang.com/vp/products/777",
+                    }
+                ]
+            }
+        }
+
+    def get_bestcategories(self, category_id):
+        return {
+            "data": [
+                {
+                    "categoryId": int(category_id),
+                    "productId": 888,
+                    "productName": "베스트 테스트 상품",
+                    "productPrice": 19900,
+                    "productUrl": "https://www.coupang.com/vp/products/888",
+                }
+            ]
+        }
+
 
 def load_smoke_module():
     script_path = Path(__file__).resolve().parent / "scripts" / "smoke_test_hosted_backend.py"
@@ -68,13 +94,34 @@ class SmokeTestHostedBackendTests(unittest.TestCase):
         with self.assertRaises(self.module.SmokeTestError):
             self.module.smoke_test(self.base_url, timeout=5, token=None, require_auth=False, query="mask")
 
+    def test_smoke_test_allows_any_https_host_when_explicitly_enabled(self):
+        self.assertEqual(
+            self.module._normalize_any_https_base_url("https://a-retn-shortener-ops-12345.us-central1.run.app"),
+            "https://a-retn-shortener-ops-12345.us-central1.run.app",
+        )
+
     def test_smoke_test_checks_public_assist_when_auth_not_required(self):
         with mock.patch.object(self.module, "_normalize_base_url", return_value=self.base_url):
-            result = self.module.smoke_test(self.base_url, timeout=5, token=None, require_auth=False, query="mask")
+            result = self.module.smoke_test(self.base_url, timeout=5, token=None, require_auth=False, query="마스크")
 
         self.assertTrue(result["ok"])
         self.assertFalse(result["auth_checked"])
-        self.assertEqual([check["name"] for check in result["checks"]], ["health", "public_assist"])
+        self.assertEqual([check["name"] for check in result["checks"]], ["health", "public_assist", "public_goldbox", "public_best"])
+        self.assertTrue(result["checks"][1]["best_fit_summary_present"])
+
+    def test_request_json_uses_openclaw_smoke_user_agent(self):
+        created_requests = []
+        original_request = self.module.request.Request
+
+        def capture_request(*args, **kwargs):
+            req = original_request(*args, **kwargs)
+            created_requests.append(req)
+            return req
+
+        with mock.patch.object(self.module.request, "Request", side_effect=capture_request):
+            self.module._request_json("GET", self.base_url + "/health", timeout=5)
+
+        self.assertEqual(created_requests[0].headers["User-agent"], "OpenClawSmoke/1.0")
 
     def test_smoke_test_runs_authenticated_checks(self):
         with mock.patch.object(self.module, "_normalize_base_url", return_value=self.base_url):
@@ -84,12 +131,28 @@ class SmokeTestHostedBackendTests(unittest.TestCase):
                     timeout=5,
                     token="smoke-token",
                     require_auth=True,
-                    query="mask",
+                    query="마스크",
                 )
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["auth_checked"])
-        self.assertEqual([check["name"] for check in result["checks"]], ["health", "public_assist", "admin_summary"])
+        self.assertEqual([check["name"] for check in result["checks"]], ["health", "public_assist", "public_goldbox", "public_best", "admin_summary"])
+        self.assertTrue(result["checks"][1]["best_fit_summary_present"])
+
+    def test_smoke_test_can_run_against_non_public_https_host_when_enabled(self):
+        with mock.patch.object(self.module, "_normalize_any_https_base_url", return_value=self.base_url):
+            with mock.patch.dict(os.environ, {"OPENCLAW_SHOPPING_API_TOKEN": "smoke-token"}, clear=True):
+                result = self.module.smoke_test(
+                    "https://a-retn-shortener-ops-12345.us-central1.run.app",
+                    timeout=5,
+                    token="smoke-token",
+                    require_auth=True,
+                    query="mask",
+                    allow_any_https_host=True,
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["auth_checked"])
 
 
 if __name__ == "__main__":

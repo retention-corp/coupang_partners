@@ -231,7 +231,8 @@ class GatherTests(unittest.TestCase):
     def test_empty_identifier_returns_source_shapes(self) -> None:
         # No isbn/title/author → gather returns empty-shaped dict from each source
         result = gather.gather_book_intel()
-        self.assertEqual(set(result.keys()), {"aladin", "data4library", "naver", "coupang", "youtube"})
+        self.assertEqual(set(result.keys()), {"aladin", "data4library", "naver", "coupang", "youtube", "context"})
+        self.assertIn("today", result["context"])
 
     def test_aladin_source_fails_soft_when_key_missing(self) -> None:
         os.environ.pop("ALADIN_TTB_KEY", None)

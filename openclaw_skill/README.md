@@ -29,6 +29,7 @@ or other items where the user says things like `내 스타일`, `내 취향`, or
 - Preserve affiliate disclosure wherever links are shown.
 - Only operators should set `OPENCLAW_SHOPPING_ALLOW_NON_PROD_BACKEND=true` for local or staging backend tests.
 - Only operators should set `OPENCLAW_SHOPPING_USE_INTERNAL_API=true` together with a bearer token.
+- In stable production, operators should also set `OPENCLAW_SHOPPING_OPERATOR_BASE_URL` to the dedicated operator service URL so internal calls do not hit `https://a.retn.kr`.
 
 ## Example
 
@@ -45,11 +46,22 @@ Closed beta traffic should always resolve to the hosted production URL.
 
 The `deeplinks` command is operator-only and uses internal routes. Public recommendation responses already include action-ready links.
 
+Stable operator setup:
+
+```bash
+export OPENCLAW_SHOPPING_OPERATOR_BASE_URL="$(gcloud run services describe a-retn-shortener-ops --project retn-kr-website --region us-central1 --format='value(status.url)')"
+export OPENCLAW_SHOPPING_API_TOKEN="replace-with-random-long-token"
+export OPENCLAW_SHOPPING_USE_INTERNAL_API="true"
+```
+
 Natural-language examples the router should pick up even without a skill prefix:
 
 - `머리가 큰 사람도 고통 없이 쓸 수 있는 미세먼지 마스크 찾아줘`
 - `대두가 써도 덜 아픈 KF94 마스크 추천해줘`
 - `쿠팡에서 AUX 선 제일 긴 거 찾아줘`
+- `쿠팡에서 로켓배송 되는 생수만 보여줘`
+- `쿠팡에서 3만원 이하 무선 마우스 추천해줘`
+- `쿠팡에서 전자제품 베스트 보여줘`
 - `쿠팡에서 요즘 볼만한 자기계발서 3개만 찾아줘. 내 스타일을 알아보고 추천해라`
 - `내 취향에 맞는 책 3권만 쿠팡에서 골라줘`
 

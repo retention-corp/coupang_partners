@@ -9,6 +9,7 @@ from urllib.error import HTTPError, URLError
 DEFAULT_BASE_URL = "https://a.retn.kr"
 DEFAULT_TIMEOUT_SECONDS = 20
 DEFAULT_QUERY = "retn hosted smoke test lightweight mask"
+DEFAULT_USER_AGENT = "OpenClawSmoke/1.0"
 
 
 class SmokeTestError(RuntimeError):
@@ -33,6 +34,14 @@ def _normalize_base_url(url: str) -> str:
     return candidate.rstrip("/")
 
 
+def _normalize_any_https_base_url(url: str) -> str:
+    candidate = (url or "").strip() or DEFAULT_BASE_URL
+    parsed = parse.urlparse(candidate)
+    if parsed.scheme != "https" or not (parsed.hostname or "").strip():
+        raise SmokeTestError(f"smoke test base URL must be an https URL: {candidate}")
+    return candidate.rstrip("/")
+
+
 def _request_json(
     method: str,
     url: str,
@@ -43,6 +52,7 @@ def _request_json(
 ) -> Dict[str, Any]:
     headers = {
         "Content-Type": "application/json",
+        "User-Agent": os.getenv("OPENCLAW_SHOPPING_SMOKE_USER_AGENT", DEFAULT_USER_AGENT),
         "X-OpenClaw-Client-Id": os.getenv("OPENCLAW_SHOPPING_CLIENT_ID", "smoke-test"),
     }
     if token:
@@ -65,8 +75,16 @@ def _request_json(
         raise SmokeTestError(f"{method} {url} returned invalid JSON: {raw}") from exc
 
 
-def smoke_test(base_url: str, *, timeout: int, token: Optional[str], require_auth: bool, query: str) -> Dict[str, Any]:
-    normalized_base_url = _normalize_base_url(base_url)
+def smoke_test(
+    base_url: str,
+    *,
+    timeout: int,
+    token: Optional[str],
+    require_auth: bool,
+    query: str,
+    allow_any_https_host: bool = False,
+) -> Dict[str, Any]:
+    normalized_base_url = _normalize_any_https_base_url(base_url) if allow_any_https_host else _normalize_base_url(base_url)
     checks = []
 
     health_payload = _request_json("GET", normalized_base_url + "/health", timeout=timeout)
@@ -81,13 +99,44 @@ def smoke_test(base_url: str, *, timeout: int, token: Optional[str], require_aut
         payload={"query": query, "limit": 1},
     )
     shortlist = assist_payload.get("shortlist") or []
-    if not assist_payload.get("best_fit") and not shortlist:
-        raise SmokeTestError("public assist smoke test returned no recommendation payload")
+    best_fit = assist_payload.get("best_fit") or {}
+    conversation_ux = assist_payload.get("conversation_ux") or {}
+    if not best_fit and not shortlist:
+        if conversation_ux.get("mode") != "number_choice" or not str(conversation_ux.get("message") or "").strip():
+            raise SmokeTestError("public assist smoke test returned neither recommendations nor fallback number-choice UX")
+    if best_fit and not (best_fit.get("summary") or "").strip():
+        raise SmokeTestError("public assist smoke test returned best_fit without summary")
     checks.append(
         {
             "name": "public_assist",
             "request_id": assist_payload.get("requestId"),
             "recommendation_count": len(shortlist) or (1 if assist_payload.get("best_fit") else 0),
+            "best_fit_summary_present": bool((best_fit.get("summary") or "").strip()),
+            "number_choice_ux_present": conversation_ux.get("mode") == "number_choice"
+            and bool(str(conversation_ux.get("message") or "").strip()),
+        }
+    )
+
+    goldbox_payload = _request_json("GET", normalized_base_url + "/v1/public/goldbox", timeout=timeout)
+    if not goldbox_payload.get("ok"):
+        raise SmokeTestError("public goldbox smoke test did not return ok=true")
+    checks.append(
+        {
+            "name": "public_goldbox",
+            "request_id": goldbox_payload.get("requestId"),
+            "count": goldbox_payload.get("count", 0),
+        }
+    )
+
+    best_payload = _request_json("GET", normalized_base_url + "/v1/public/best/1016", timeout=timeout)
+    if not best_payload.get("ok"):
+        raise SmokeTestError("public best smoke test did not return ok=true")
+    checks.append(
+        {
+            "name": "public_best",
+            "request_id": best_payload.get("requestId"),
+            "product_count": len((best_payload.get("data") or {}).get("products") or []),
+            "category_id": (best_payload.get("data") or {}).get("category_id"),
         }
     )
 
@@ -121,6 +170,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--query", default=DEFAULT_QUERY)
     parser.add_argument("--require-auth", action="store_true")
+    parser.add_argument("--allow-any-https-host", action="store_true")
     return parser.parse_args()
 
 
@@ -133,6 +183,7 @@ def main() -> int:
             token=_auth_token(),
             require_auth=args.require_auth,
             query=args.query,
+            allow_any_https_host=args.allow_any_https_host,
         )
     except SmokeTestError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))

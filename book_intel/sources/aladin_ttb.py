@@ -103,7 +103,7 @@ class AladinTTBClient:
             "ItemIdType": "ISBN13",
             "ItemId": isbn13,
             "Cover": "Big",
-            "OptResult": "ebookList,usedList,ratingInfo,reviewList",
+            "OptResult": "authors,fulldescription,Toc,bookinfo,ratingInfo,reviewList",
         })
         items = _extract_items(payload)
         return items[0] if items else None
@@ -177,6 +177,27 @@ def normalize_book(item: dict[str, Any]) -> dict[str, Any]:
 
     if not isinstance(item, dict):
         return {}
+
+    # `subInfo` holds OptResult extras: fulldescription, toc, authorInfo, bookinfo.
+    sub = item.get("subInfo") or {}
+    if not isinstance(sub, dict):
+        sub = {}
+
+    author_info = ""
+    authors_raw = sub.get("authors") or []
+    if isinstance(authors_raw, list) and authors_raw:
+        parts = []
+        for a in authors_raw:
+            if not isinstance(a, dict):
+                continue
+            nm = (a.get("authorName") or "").strip()
+            info = (a.get("authorInfo") or "").strip()
+            if nm and info:
+                parts.append(f"{nm}: {info}")
+            elif nm:
+                parts.append(nm)
+        author_info = "\n\n".join(parts)
+
     return {
         "title": (item.get("title") or "").strip(),
         "author": (item.get("author") or "").strip(),
@@ -184,6 +205,10 @@ def normalize_book(item: dict[str, Any]) -> dict[str, Any]:
         "isbn13": (item.get("isbn13") or item.get("isbn") or "").strip(),
         "pub_date": (item.get("pubDate") or "").strip(),
         "description": (item.get("description") or "").strip(),
+        "full_description": (sub.get("fullDescription") or sub.get("fulldescription") or "").strip(),
+        "toc": (sub.get("toc") or "").strip(),
+        "author_info": author_info,
+        "book_info": sub.get("bookinfo") or {},
         "cover": (item.get("cover") or "").strip(),
         "category_name": (item.get("categoryName") or "").strip(),
         "price_standard": item.get("priceStandard"),

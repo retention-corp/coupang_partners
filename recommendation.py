@@ -44,6 +44,40 @@ _QUERY_MUST_HAVE_RULES = (
     ("aux", ["aux"]),
     ("3.5mm", ["3.5mm"]),
 )
+_QUERY_RELEVANCE_STOPWORDS = {
+    "추천",
+    "추천해줘",
+    "찾아줘",
+    "검색",
+    "검색해줘",
+    "보여줘",
+    "골라줘",
+    "알려줘",
+    "이하",
+    "이상",
+    "미만",
+    "초과",
+    "만원",
+    "원",
+    "쿠팡",
+    "로켓",
+    "배송",
+    "무료배송",
+    "저렴한",
+    "싼",
+    "가성비",
+    "좋은",
+}
+_QUERY_RELEVANCE_MODIFIERS = {
+    "무선",
+    "유선",
+    "저소음",
+    "원룸",
+    "소형",
+    "대형",
+    "미니",
+    "휴대용",
+}
 
 
 def _coerce_int(value: Any) -> Optional[int]:
@@ -75,7 +109,7 @@ def normalize_product(raw_product: Dict[str, Any]) -> Dict[str, Any]:
     description = raw_product.get("description") or ""
     page_description = raw_product.get("page_description") or ""
     page_snippets = list(raw_product.get("page_snippets") or [])
-    summary = _build_product_summary(description, page_description, page_snippets)
+    summary = _build_product_summary(title, description, page_description, page_snippets)
     return {
         "product_id": str(raw_product.get("product_id") or raw_product.get("productId") or raw_product.get("id") or title),
         "title": title,
@@ -98,6 +132,7 @@ def normalize_product(raw_product: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _build_product_summary(
+    title: str,
     description: str,
     page_description: str,
     page_snippets: List[str],
@@ -116,7 +151,7 @@ def _build_product_summary(
         text = (str(snippet) or "").strip()
         if text:
             return text[:280]
-    return ""
+    return (title or "").strip()[:280]
 
 
 def normalize_request(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -246,6 +281,7 @@ def recommend_products(
     gated_recommendations: List[Dict[str, Any]] = []
     fallback_recommendations: List[Dict[str, Any]] = []
     inferred_query_terms = _infer_must_have_terms(query)
+    required_query_terms = inferred_query_terms or _required_relevance_terms(query)
     for raw_product in products:
         product = normalize_product(raw_product)
         if budget is not None and product["price"] is not None and product["price"] > budget * 1.25:
@@ -292,11 +328,12 @@ def recommend_products(
             intent_type=intent_type,
             comparison_value=comparison_value,
             inferred_query_terms=inferred_query_terms,
+            required_query_terms=required_query_terms,
         ):
             gated_recommendations.append(recommendation)
         fallback_recommendations.append(recommendation)
 
-    recommendations = gated_recommendations or fallback_recommendations
+    recommendations = gated_recommendations or ([] if required_query_terms else fallback_recommendations)
     if intent_type == INTENT_EXTREMUM_SEARCH and sort_key:
         _sort_extremum_recommendations(recommendations, sort_key, sort_direction or "desc")
     else:
@@ -310,6 +347,7 @@ def _passes_generic_relevance_gate(
     intent_type: str,
     comparison_value: Optional[float],
     inferred_query_terms: Optional[List[str]] = None,
+    required_query_terms: Optional[List[str]] = None,
 ) -> bool:
     evidence = recommendation.get("evidence", {})
     matched_terms = evidence.get("matched_terms") or []
@@ -317,6 +355,10 @@ def _passes_generic_relevance_gate(
     listing_facts = " ".join(evidence.get("facts") or [])
     has_listing_signal = "Listing signals:" in listing_facts
     title = str(recommendation.get("title") or "").lower()
+    searchable_text = _recommendation_searchable_text(recommendation)
+
+    if required_query_terms and not any(term.lower() in searchable_text for term in required_query_terms):
+        return False
 
     if matched_terms:
         return True
@@ -329,6 +371,35 @@ def _passes_generic_relevance_gate(
     if intent_type == INTENT_EXTREMUM_SEARCH and comparison_value is not None:
         return True
     return False
+
+
+def _required_relevance_terms(query: str) -> List[str]:
+    tokens = re.findall(r"[\w가-힣]+", _clean_search_query(query).lower())
+    required: List[str] = []
+    for token in tokens:
+        if len(token) <= 1:
+            continue
+        if any(char.isdigit() for char in token):
+            continue
+        if token in _QUERY_RELEVANCE_STOPWORDS or token in _QUERY_RELEVANCE_MODIFIERS:
+            continue
+        required.append(token)
+    return list(dict.fromkeys(required))
+
+
+def _recommendation_searchable_text(recommendation: Dict[str, Any]) -> str:
+    metadata = recommendation.get("metadata") or {}
+    fields = [
+        recommendation.get("title"),
+        recommendation.get("summary"),
+        recommendation.get("description"),
+        recommendation.get("page_title"),
+        recommendation.get("page_description"),
+        metadata.get("productName"),
+        metadata.get("categoryName"),
+    ]
+    fields.extend(recommendation.get("page_snippets") or [])
+    return " ".join(str(value).lower() for value in fields if str(value or "").strip())
 
 
 def build_assist_response(
@@ -348,12 +419,12 @@ def build_assist_response(
     summary_parts = []
     if best_fit:
         summary_parts.append(_build_summary_lead(best_fit, normalized))
-        if best_fit.get("evidence", {}).get("confidence") == "low":
-            summary_parts.append("현재 후보는 메타데이터 중심 매칭이라 실제 적합성 확인이 더 필요합니다.")
         if best_fit.get("rationale"):
             summary_parts.append(best_fit["rationale"])
     else:
         summary_parts.append("현재 조건으로는 충분히 강한 후보를 찾지 못했습니다")
+
+    conversation_ux = _build_conversation_ux(normalized, recommendations[:3])
 
     return {
         "query_id": query_id,
@@ -361,10 +432,98 @@ def build_assist_response(
         "search_plan": search_plan,
         "best_fit": best_fit,
         "shortlist": recommendations[:3],
+        "conversation_ux": conversation_ux,
         "summary": " ".join(summary_parts),
         "risks": risks,
         "disclosure": DISCLOSURE_TEXT,
     }
+
+
+def _build_conversation_ux(normalized: Dict[str, Any], recommendations: List[Dict[str, Any]]) -> Dict[str, Any]:
+    query = normalized.get("query") or "요청하신 상품"
+    if not recommendations:
+        return {
+            "mode": "number_choice",
+            "message": f"{query} 기준으로 바로 추천할 만한 후보를 찾지 못했습니다. 없으면 '없다'라고 답하면 됩니다.",
+            "choices": [],
+            "reply_hint": "없다",
+        }
+
+    lines = [f"{query} 후보를 찾았습니다."]
+    choices: List[Dict[str, Any]] = []
+    for index, item in enumerate(recommendations, start=1):
+        metrics = _format_choice_metrics(item)
+        reason = _format_choice_reason(item)
+        line = f"{index}. {item.get('title') or '상품명 없음'}"
+        if metrics:
+            line += f"\n   {metrics}"
+        if reason:
+            line += f"\n   이유: {reason}"
+        lines.append(line)
+        choices.append(
+            {
+                "number": index,
+                "product_id": item.get("product_id"),
+                "title": item.get("title"),
+                "price": item.get("price"),
+                "rating": item.get("rating"),
+                "review_count": item.get("review_count"),
+                "reason": reason,
+                "deeplink": item.get("short_deeplink") or item.get("deeplink"),
+            }
+        )
+    lines.append("살만한 게 있으면 번호만 보내주세요. 없으면 '없다'라고 보내면 됩니다.")
+    return {
+        "mode": "number_choice",
+        "message": "\n\n".join(lines),
+        "choices": choices,
+        "reply_hint": "번호만 입력하거나 없다",
+    }
+
+
+def _format_choice_metrics(item: Dict[str, Any]) -> str:
+    metrics: List[str] = []
+    price = item.get("price")
+    if price is not None:
+        metrics.append(f"₩{int(price):,}")
+    rating = item.get("rating")
+    if rating:
+        metrics.append(f"평점 {float(rating):.1f}")
+    review_count = item.get("review_count")
+    if review_count:
+        metrics.append(f"리뷰 {int(review_count):,}개")
+    comparison_label = (item.get("comparison") or {}).get("label")
+    if comparison_label:
+        sort_key = (item.get("comparison") or {}).get("sort_key")
+        if sort_key == "price":
+            metrics.append(f"비교 기준 {comparison_label}")
+        elif sort_key == "rating":
+            metrics.append(f"비교 기준 {comparison_label}")
+        elif sort_key == "review_count":
+            metrics.append(f"비교 기준 {comparison_label}")
+        elif sort_key == "length_m":
+            metrics.append(f"길이 {comparison_label}")
+    return " · ".join(metrics)
+
+
+def _format_choice_reason(item: Dict[str, Any]) -> str:
+    title = str(item.get("title") or "")
+    evidence = item.get("evidence") or {}
+    matched_terms = [str(term) for term in evidence.get("matched_terms") or []]
+    signals = []
+    if matched_terms:
+        signals.append(f"요청어({', '.join(matched_terms[:4])})와 맞음")
+    if item.get("rating") and float(item.get("rating") or 0) >= 4.5:
+        signals.append("평점이 높음")
+    if item.get("review_count") and int(item.get("review_count") or 0) >= 100:
+        signals.append("리뷰 수가 충분함")
+    summary = str(item.get("summary") or "").strip()
+    if summary and summary != title:
+        compact = re.sub(r"\s+", " ", summary)
+        signals.append(compact[:80])
+    if not signals:
+        signals.append("현재 확보된 상품 정보 안에서 가장 조건에 가까움")
+    return ", ".join(signals[:3])
 
 
 def _parse_budget_from_text(text: str) -> Optional[int]:

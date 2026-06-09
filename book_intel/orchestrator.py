@@ -55,11 +55,24 @@ CLUSTER_PERSONAS: dict[str, dict[str, Any]] = {
         "interests": ["엔지니어링", "백엔드", "아키텍처"],
         "categories": ["자연과학", "자기계발"],
         "engineering_weight": 1.0,
+        "concept_mapping_hints": [
+            "스래싱(thrashing)",
+            "컨텍스트 스위치 비용",
+            "캐시 미스",
+            "백프레셔(backpressure)",
+            "병목 / 큐잉 이론",
+        ],
     },
     "openclaw_operator": {
         "interests": ["솔로 오퍼레이터", "수익화", "스타트업", "프로덕트"],
         "categories": ["자기계발", "자연과학"],
         "engineering_weight": 0.5,
+        "concept_mapping_hints": [
+            "런웨이/일정 리스크",
+            "단위 경제성",
+            "의사결정 지연 비용",
+            "혼자 일하는 사람의 기회비용",
+        ],
     },
     "general_self_dev": {
         "interests": ["자기계발", "경영", "재무"],
@@ -224,6 +237,11 @@ def _run_slot(
     )
     raw["book"] = book
     raw["target_persona"] = persona_dict
+    raw["persona_hints"] = {
+        "cluster": cluster,
+        "tier": tier,
+        "concept_mapping_hints": persona_dict.get("concept_mapping_hints") or [],
+    }
     raw["coupang"]["affiliate_product"] = {
         "title": product.get("title"),
         "price": product.get("price"),
@@ -246,12 +264,14 @@ def _run_slot(
         body_markdown = body_markdown.rstrip() + f"\n\n[쿠팡에서 보기]({deeplink})\n"
     post["body_markdown"] = body_markdown
 
+    canvas = post.get("canvas") or {}
     slot["post"] = {
         "title": post["title"],
         "lead": post["lead"],
         "body_chars": len(post["body_markdown"]),
         "tags": post["tags"],
         "prompt_variant": post["prompt_variant"],
+        "canvas_fields": [k for k, v in canvas.items() if v],
     }
 
     if config.dry_run or ghost is None:
@@ -266,6 +286,7 @@ def _run_slot(
             body_markdown=post["body_markdown"],
             tags=post["tags"],
             status=config.publisher_status,
+            canvas=canvas,
         )
     except GhostPublishError as exc:
         LOGGER.warning("Ghost publish failed: %s", exc)
@@ -307,6 +328,7 @@ def _ghost_preview(post: dict[str, Any], *, ghost_base: str) -> dict[str, Any]:
         lead=post["lead"],
         body_markdown=post["body_markdown"],
         tags=post["tags"],
+        canvas=post.get("canvas") or {},
     )
 
 

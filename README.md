@@ -77,21 +77,29 @@ python3 backend.py
 
 Do not present the operator-only local backend flow as the default path for public users.
 
-Public endpoints:
+Public endpoints (tokenless, exposed on production):
 
 - `GET /health`
 - `POST /v1/public/assist`
-- `POST /v1/public/events`
-- `POST /v1/public/deeplinks`
+- `POST /v1/public/search`
+- `POST /v1/public/goldbox`
+- `GET /v1/public/best/{category_id}`
+- `GET /s/{slug}`
 
-Protected endpoints require:
+Operator-only endpoints (bearer-auth, gated by `OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES=true`; disabled on production by default):
 
-- `Authorization: Bearer <token>` when calling internal or admin endpoints
-- optional `X-OpenClaw-Client-Id` for caller identification
+- `Authorization: Bearer <token>` required; optional `X-OpenClaw-Client-Id` for caller identification
 - `POST /internal/v1/assist`
 - `POST /internal/v1/events`
 - `POST /internal/v1/deeplinks`
+- `POST /v1/assist`, `POST /v1/events`, `POST /v1/deeplinks` (legacy aliases)
 - `GET /v1/admin/summary`
+
+Production note:
+
+- Public production should stay on `a-retn-shortener` / `https://a.retn.kr` with `OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES=false`.
+- Stable operator traffic should use a separate Cloud Run service such as `a-retn-shortener-ops` with `OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES=true`.
+- The public service toggle path is still available for one-off validation, but it should not be the normal operating model.
 
 Optional hardening env vars:
 
@@ -106,8 +114,10 @@ Client compatibility notes:
 - Thin clients default to tokenless public gateway paths under `https://a.retn.kr`
 - Thin clients accept both `OPENCLAW_SHOPPING_API_TOKEN` and `OPENCLAW_SHOPPING_API_TOKENS` for operator-only internal calls
 - Thin clients accept `OPENCLAW_SHOPPING_BASE_URL`, `OPENCLAW_SHOPPING_BACKEND_URL`, or `SHOPPING_COPILOT_BASE_URL`
+- Thin clients also accept `OPENCLAW_SHOPPING_OPERATOR_BASE_URL` and `OPENCLAW_SHOPPING_OPERATOR_BACKEND_URL` for internal/operator traffic
 - Thin clients in the default beta path are pinned to `https://a.retn.kr`; localhost or other non-production overrides are ignored unless `OPENCLAW_SHOPPING_ALLOW_NON_PROD_BACKEND=true`
 - Set `OPENCLAW_SHOPPING_USE_INTERNAL_API=true` only for operator/staging flows that should hit `/internal/v1/*`
+- In stable production, set `OPENCLAW_SHOPPING_OPERATOR_BASE_URL` to the operator service URL instead of sending internal traffic to `https://a.retn.kr`
 
 Default protection:
 
@@ -126,7 +136,8 @@ export OPENCLAW_SHOPPING_PUBLIC_BASE_URL="https://go.example.com"
 
 If you are testing internal/operator flows against a non-local host, also set
 `OPENCLAW_SHOPPING_API_TOKEN` or `OPENCLAW_SHOPPING_API_TOKENS` together with
-`OPENCLAW_SHOPPING_USE_INTERNAL_API=true`.
+`OPENCLAW_SHOPPING_USE_INTERNAL_API=true`. In the split-service production setup,
+also set `OPENCLAW_SHOPPING_OPERATOR_BASE_URL` to the operator service URL.
 
 Local development is intentionally a separate override path. Public docs and install defaults should keep pointing at `https://a.retn.kr`.
 
@@ -185,7 +196,7 @@ python3 bin/openclaw_shopping.py \
 Operator/internal example:
 
 ```bash
-export OPENCLAW_SHOPPING_BASE_URL="https://a.retn.kr"
+export OPENCLAW_SHOPPING_OPERATOR_BASE_URL="$(gcloud run services describe a-retn-shortener-ops --project retn-kr-website --region us-central1 --format='value(status.url)')"
 export OPENCLAW_SHOPPING_API_TOKEN="replace-with-random-long-token"
 export OPENCLAW_SHOPPING_USE_INTERNAL_API="true"
 
@@ -202,6 +213,14 @@ The public OpenClaw skill should:
 4. Never request or expose Coupang affiliate secrets client-side.
 
 See `openclaw_skill/README.md` for the public contract.
+
+Short prompt examples for k-skill / shopping-copilot users:
+
+- `쿠팡에서 3만원 이하 무선 마우스 추천해줘`
+- `쿠팡에서 로켓배송 되는 생수만 보여줘`
+- `쿠팡에서 AUX 선 제일 긴 거 찾아줘`
+- `쿠팡에서 전자제품 베스트 보여줘`
+- `쿠팡에서 요즘 볼만한 자기계발서 3개만 골라줘`
 
 ## Compliance and product guardrails
 
