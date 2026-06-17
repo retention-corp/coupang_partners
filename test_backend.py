@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from urllib import error, request
@@ -192,7 +193,8 @@ class BackendTests(unittest.TestCase):
 
         summary = json.loads(request.urlopen(f"{self.base_url}/v1/admin/summary", timeout=5).read().decode("utf-8"))
         self.assertEqual(summary["total_queries"], 1)
-        self.assertEqual(summary["total_events"], 1)
+        # 2 events: 1 attribution-tagged `assist` (new in spec T1), 1 deeplink_clicked.
+        self.assertEqual(summary["total_events"], 2)
         self.assertEqual(summary["total_short_links"], 1)
         self.assertIn("economics", summary)
         self.assertEqual(summary["economics"]["funnel"]["total_queries"], 1)
@@ -345,6 +347,45 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 403)
         ctx.exception.close()
 
+    def test_public_allowlist_accepts_prefix_wildcard_client(self):
+        os.environ["OPENCLAW_SHOPPING_CLIENT_ALLOWLIST_ENABLED"] = "true"
+        os.environ["OPENCLAW_SHOPPING_CLIENT_ALLOWLIST"] = "openclaw-skill-*,hermes-agent"
+        request_obj = request.Request(
+            f"{self.base_url}/v1/public/assist",
+            data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-OpenClaw-Client-Id": "openclaw-skill-localhash",
+            },
+            method="POST",
+        )
+        response = json.loads(request.urlopen(request_obj, timeout=5).read().decode("utf-8"))
+        self.assertIn("best_fit", response)
+
+    def test_allowlisted_public_clients_get_separate_rate_buckets(self):
+        os.environ["OPENCLAW_SHOPPING_CLIENT_ALLOWLIST_ENABLED"] = "true"
+        os.environ["OPENCLAW_SHOPPING_CLIENT_ALLOWLIST"] = "agent-a,agent-b"
+        _Handler.public_rate_limiter = RateLimiter(window_seconds=60, max_requests=1)
+        request_a = request.Request(
+            f"{self.base_url}/v1/public/assist",
+            data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-OpenClaw-Client-Id": "agent-a"},
+            method="POST",
+        )
+        request_b = request.Request(
+            f"{self.base_url}/v1/public/assist",
+            data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-OpenClaw-Client-Id": "agent-b"},
+            method="POST",
+        )
+
+        request.urlopen(request_a, timeout=5).read()
+        request.urlopen(request_b, timeout=5).read()
+        with self.assertRaises(error.HTTPError) as ctx:
+            request.urlopen(request_a, timeout=5)
+        self.assertEqual(ctx.exception.code, 429)
+        ctx.exception.close()
+
     def test_public_and_authenticated_buckets_are_separate(self):
         _Handler.rate_limiter = RateLimiter(window_seconds=60, max_requests=30)
         _Handler.public_rate_limiter = RateLimiter(window_seconds=60, max_requests=1)
@@ -454,6 +495,7 @@ class BackendTests(unittest.TestCase):
             analytics_store=AnalyticsStore(f"{self.tempdir.name}/degraded.sqlite3"),
         )
         response = backend.assist({"query": "30만원 이하 무선청소기"})
+        # Empty shortlist instead of HTTP 500 — contract k-skill relies on.
         self.assertEqual(response["shortlist"], [])
         self.assertIsNone(response["best_fit"])
         self.assertEqual(response["degraded"], "coupang_api_status_429")
@@ -538,6 +580,426 @@ class BackendTests(unittest.TestCase):
             request.urlopen(request_obj, timeout=5)
         self.assertEqual(ctx.exception.code, 404)
         ctx.exception.close()
+
+    # ------------------------------------------------------------------ #
+    # T1 attribution header parsing + analytics persistence (spec D9/R1.1/R1.5)
+    # ------------------------------------------------------------------ #
+
+    def _read_assist_events(self):
+        """Return rows from `events` with `event_type='assist'`, newest first.
+
+        The assist events are emitted by the attribution-tagging middleware added in T1 —
+        one per /v1/public/assist POST — and carry the 4 attribution columns.
+        """
+
+        db_path = f"{self.tempdir.name}/analytics.sqlite3"
+        with sqlite3.connect(db_path) as connection:
+            rows = connection.execute(
+                "SELECT event_type, surface, surface_raw, client_id, client_version, utm_source "
+                "FROM events WHERE event_type = 'assist' ORDER BY created_at DESC"
+            ).fetchall()
+        return rows
+
+    def test_attribution_headers_happy_path_persists_all_four_values(self):
+        """Spec R1.1: 3 headers + utm_source query must all end up on the assist event."""
+
+        assist_request = request.Request(
+            f"{self.base_url}/v1/public/assist?utm_source=x-daily-builder",
+            data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-OpenClaw-Surface": "chatgpt-gpt",
+                "X-OpenClaw-Client-Id": "uuid-123",
+                "X-OpenClaw-Version": "1.2.3",
+            },
+            method="POST",
+        )
+        response = json.loads(request.urlopen(assist_request, timeout=5).read().decode("utf-8"))
+        self.assertIn("best_fit", response)
+
+        rows = self._read_assist_events()
+        self.assertEqual(len(rows), 1)
+        event_type, surface, surface_raw, client_id, client_version, utm_source = rows[0]
+        self.assertEqual(event_type, "assist")
+        self.assertEqual(surface, "chatgpt-gpt")
+        self.assertIsNone(surface_raw)
+        self.assertEqual(client_id, "uuid-123")
+        self.assertEqual(client_version, "1.2.3")
+        self.assertEqual(utm_source, "x-daily-builder")
+
+    def test_attribution_unknown_surface_normalizes_and_preserves_raw(self):
+        """Spec R1.5: unrecognized surface → 'unknown' + raw preserved + request succeeds."""
+
+        assist_request = request.Request(
+            f"{self.base_url}/v1/public/assist",
+            data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-OpenClaw-Surface": "some-weird-value",
+                "X-OpenClaw-Client-Id": "uuid-456",
+            },
+            method="POST",
+        )
+        # Must still return 200 — warn, don't reject.
+        response = json.loads(request.urlopen(assist_request, timeout=5).read().decode("utf-8"))
+        self.assertIn("best_fit", response)
+
+        rows = self._read_assist_events()
+        self.assertEqual(len(rows), 1)
+        _, surface, surface_raw, client_id, _, _ = rows[0]
+        self.assertEqual(surface, "unknown")
+        self.assertEqual(surface_raw, "some-weird-value")
+        self.assertEqual(client_id, "uuid-456")
+
+    # ------------------------------------------------------------------ #
+    # T2 OpenAPI spec + /docs surface (spec R1.2)
+    # ------------------------------------------------------------------ #
+
+    def test_openapi_json_documents_public_endpoints_and_attribution_headers(self):
+        """Spec R1.2: /openapi.json must be a valid OpenAPI 3.1 doc that documents
+        the /v1/public/assist endpoint with all four attribution parameters (3 headers
+        + utm_source query). GPT Store and Claude Code skill submissions rely on this."""
+
+        response = request.urlopen(f"{self.base_url}/openapi.json", timeout=5)
+        self.assertEqual(response.status, 200)
+        content_type = response.headers.get("Content-Type", "")
+        self.assertIn("application/json", content_type)
+        body = json.loads(response.read().decode("utf-8"))
+        response.close()
+
+        # Top-level shape.
+        self.assertTrue(body["openapi"].startswith("3.1"), f"unexpected openapi version: {body['openapi']!r}")
+        self.assertIn("info", body)
+        self.assertIn("title", body["info"])
+        self.assertIn("version", body["info"])
+        self.assertIn("servers", body)
+        self.assertTrue(
+            any(server.get("url") == "https://a.retn.kr" for server in body["servers"]),
+            "Production server https://a.retn.kr must be in servers[]",
+        )
+
+        # Paths cover every public route exposed by the current backend.
+        paths = body.get("paths", {})
+        for expected in (
+            "/health",
+            "/v1/public/assist",
+            "/v1/public/search",
+            "/v1/public/goldbox",
+            "/v1/public/best/{category_id}",
+            "/s/{slug}",
+        ):
+            self.assertIn(expected, paths, f"expected path {expected} in OpenAPI doc")
+
+        # /v1/public/assist must document the 4 attribution parameters (3 headers + utm_source).
+        assist_post = paths["/v1/public/assist"]["post"]
+        params = assist_post.get("parameters", [])
+        param_names = {(p.get("name"), p.get("in")) for p in params}
+        for expected_param in (
+            ("x-openclaw-surface", "header"),
+            ("x-openclaw-client-id", "header"),
+            ("x-openclaw-version", "header"),
+            ("utm_source", "query"),
+        ):
+            self.assertIn(
+                expected_param,
+                param_names,
+                f"assist endpoint missing attribution param {expected_param}",
+            )
+
+        # 200/400/429 responses defined for the assist endpoint.
+        responses_block = assist_post.get("responses", {})
+        for code in ("200", "400", "429"):
+            self.assertIn(code, responses_block)
+
+    def test_docs_serves_swagger_ui_pointing_at_openapi_json(self):
+        """Spec R1.2: /docs returns HTML that loads Swagger UI (or equivalent) and
+        points it at /openapi.json so developers can explore the API in a browser."""
+
+        response = request.urlopen(f"{self.base_url}/docs", timeout=5)
+        self.assertEqual(response.status, 200)
+        self.assertIn("text/html", response.headers.get("Content-Type", ""))
+        body = response.read().decode("utf-8")
+        response.close()
+        # Must reference /openapi.json and include at least one <script> or <link>.
+        self.assertIn("/openapi.json", body)
+        self.assertTrue(
+            "<script" in body or "<link" in body,
+            "docs page must include script/link tag for the UI bundle",
+        )
+
+    def test_attribution_missing_client_id_falls_back_to_anonymous_hash(self):
+        """Spec D9: missing x-openclaw-client-id → deterministic 'anonymous-<ip hash>'."""
+
+        assist_request = request.Request(
+            f"{self.base_url}/v1/public/assist",
+            data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                # Intentionally no X-OpenClaw-Client-Id.
+                "X-OpenClaw-Surface": "cli",
+            },
+            method="POST",
+        )
+        response = json.loads(request.urlopen(assist_request, timeout=5).read().decode("utf-8"))
+        self.assertIn("best_fit", response)
+
+        rows = self._read_assist_events()
+        self.assertEqual(len(rows), 1)
+        _, surface, _, client_id, _, _ = rows[0]
+        self.assertEqual(surface, "cli")
+        self.assertTrue(client_id.startswith("anonymous-"), f"expected anonymous fallback, got {client_id!r}")
+        # Hash body should be hex and nonempty (length of sha1 truncation).
+        self.assertEqual(len(client_id), len("anonymous-") + 16)
+
+
+class ResponseCacheTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self._saved_ttl = os.environ.get("OPENCLAW_SHOPPING_RESPONSE_CACHE_TTL_SECONDS")
+
+    def tearDown(self):
+        self.tempdir.cleanup()
+        if self._saved_ttl is None:
+            os.environ.pop("OPENCLAW_SHOPPING_RESPONSE_CACHE_TTL_SECONDS", None)
+        else:
+            os.environ["OPENCLAW_SHOPPING_RESPONSE_CACHE_TTL_SECONDS"] = self._saved_ttl
+
+    def _build_backend(self, adapter):
+        return ShoppingBackend(
+            adapter=adapter,
+            analytics_store=AnalyticsStore(f"{self.tempdir.name}/a.sqlite3"),
+        )
+
+    def test_goldbox_response_cached_within_ttl(self):
+        os.environ["OPENCLAW_SHOPPING_RESPONSE_CACHE_TTL_SECONDS"] = "900"
+
+        class Counter:
+            calls = 0
+
+            def get_goldbox(self_inner):
+                Counter.calls += 1
+                return {"data": [{"productId": 10, "productName": "딜", "productPrice": 1000, "productUrl": "https://www.coupang.com/vp/products/10"}]}
+
+        backend = self._build_backend(Counter())
+        first = backend.goldbox()
+        second = backend.goldbox()
+        self.assertEqual(Counter.calls, 1)
+        self.assertEqual(first["data"]["deals"], second["data"]["deals"])
+
+    def test_best_response_cached_per_category(self):
+        os.environ["OPENCLAW_SHOPPING_RESPONSE_CACHE_TTL_SECONDS"] = "900"
+
+        class Counter:
+            calls: dict = {}
+
+            def get_bestcategories(self_inner, category_id):
+                Counter.calls[category_id] = Counter.calls.get(category_id, 0) + 1
+                return {"data": [{"productId": int(category_id), "productName": f"cat-{category_id}", "productPrice": 2000, "productUrl": f"https://www.coupang.com/vp/products/{category_id}"}]}
+
+        backend = self._build_backend(Counter())
+        backend.best("1001")
+        backend.best("1001")
+        backend.best("1002")
+        self.assertEqual(Counter.calls, {"1001": 1, "1002": 1})
+
+    def test_cache_disabled_when_ttl_zero(self):
+        os.environ["OPENCLAW_SHOPPING_RESPONSE_CACHE_TTL_SECONDS"] = "0"
+
+        class Counter:
+            calls = 0
+
+            def get_goldbox(self_inner):
+                Counter.calls += 1
+                return {"data": []}
+
+        backend = self._build_backend(Counter())
+        backend.goldbox()
+        backend.goldbox()
+        self.assertEqual(Counter.calls, 2)
+
+
+# ---------------------------------------------------------------------------- #
+# T5: shortlink redirect attribution handler tests.
+# Real-world baseline (2026-04-21): 6 raw redirects, Coupang reported 1 click.
+# Investigation found every remote_addr was the Google FE proxy link-local IP.
+# These tests pin that the handler now captures XFF+UA on the stored event row.
+# ---------------------------------------------------------------------------- #
+class ShortlinkAttributionHandlerTests(unittest.TestCase):
+    """Own server+DB fixture — independent from BackendTests so we don't re-run its tests."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self._saved_env = {
+            "OPENCLAW_SHOPPING_API_TOKENS": os.environ.get("OPENCLAW_SHOPPING_API_TOKENS"),
+            "OPENCLAW_SHOPPING_API_TOKEN": os.environ.get("OPENCLAW_SHOPPING_API_TOKEN"),
+            "OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES": os.environ.get("OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES"),
+        }
+        for key in self._saved_env:
+            os.environ.pop(key, None)
+        os.environ["OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES"] = "true"
+        _Handler.rate_limiter = RateLimiter(window_seconds=60, max_requests=30)
+        _Handler.public_rate_limiter = None
+        _Handler.authenticated_rate_limiter = None
+        _Handler.admin_rate_limiter = None
+        self.server = build_server(
+            host="127.0.0.1",
+            port=0,
+            adapter=FakeAdapter(),
+            db_path=f"{self.tempdir.name}/analytics.sqlite3",
+            public_base_url="https://go.example.com",
+        )
+        self.thread = serve_in_thread(self.server)
+        self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.tempdir.cleanup()
+        for key, value in self._saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _read_shortlink_redirect_events(self):
+        db_path = f"{self.tempdir.name}/analytics.sqlite3"
+        with sqlite3.connect(db_path) as connection:
+            rows = connection.execute(
+                "SELECT client_ip, user_agent, proxy_ip, metadata_json "
+                "FROM events WHERE event_type = 'shortlink_redirect' "
+                "ORDER BY created_at ASC"
+            ).fetchall()
+        return rows
+
+    def _seed_slug(self):
+        assist_request = request.Request(
+            f"{self.base_url}/v1/public/assist",
+            data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        assist = json.loads(request.urlopen(assist_request, timeout=5).read().decode("utf-8"))
+        return assist["best_fit"]["short_deeplink"].rsplit("/", 1)[-1]
+
+    def test_shortlink_redirect_logs_xff_and_ua(self):
+        slug = self._seed_slug()
+
+        class NoRedirect(request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        req_obj = request.Request(
+            f"{self.base_url}/s/{slug}",
+            headers={
+                "X-Forwarded-For": "1.2.3.4, 5.6.7.8",
+                "User-Agent": "curl/7.88.1",
+            },
+        )
+        opener = request.build_opener(NoRedirect)
+        with self.assertRaises(error.HTTPError) as ctx:
+            opener.open(req_obj, timeout=5)
+        ctx.exception.close()
+
+        rows = self._read_shortlink_redirect_events()
+        self.assertEqual(len(rows), 1)
+        client_ip, user_agent, proxy_ip, _ = rows[0]
+        self.assertEqual(client_ip, "1.2.3.4")
+        self.assertEqual(user_agent, "curl/7.88.1")
+        # proxy_ip is whatever the TCP peer looks like from a loopback connection —
+        # we just assert it's present and distinct from the XFF client_ip.
+        self.assertTrue(proxy_ip)
+        self.assertNotEqual(proxy_ip, client_ip)
+
+    def test_shortlink_redirect_fallback_without_xff(self):
+        slug = self._seed_slug()
+
+        class NoRedirect(request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        req_obj = request.Request(
+            f"{self.base_url}/s/{slug}",
+            headers={"User-Agent": "probe/1.0"},
+        )
+        opener = request.build_opener(NoRedirect)
+        with self.assertRaises(error.HTTPError) as ctx:
+            opener.open(req_obj, timeout=5)
+        ctx.exception.close()
+
+        rows = self._read_shortlink_redirect_events()
+        self.assertEqual(len(rows), 1)
+        client_ip, user_agent, proxy_ip, _ = rows[0]
+        # Without XFF, client_ip == TCP peer.
+        self.assertEqual(client_ip, proxy_ip)
+        self.assertTrue(client_ip)
+        self.assertEqual(user_agent, "probe/1.0")
+
+    def test_admin_proxy_gmv_endpoint_returns_written_rows(self):
+        """Part 6: GET /v1/admin/gmv/proxy surfaces rows the weekly batch wrote."""
+
+        # Seed one shortlink_redirect + run the batch so the admin endpoint has data.
+        import uuid as _uuid
+        from datetime import datetime as _dt, timezone as _tz
+
+        from economics import KST, compute_weekly_proxy_gmv
+
+        db_path = f"{self.tempdir.name}/analytics.sqlite3"
+        week_start = _dt(2026, 4, 20, 0, 0, 0, tzinfo=KST)
+        click_time_utc = _dt(2026, 4, 21, 12, 0, 0, tzinfo=KST).astimezone(_tz.utc)
+        with sqlite3.connect(db_path) as connection:
+            connection.execute(
+                "INSERT INTO events ("
+                "id, event_type, metadata_json, created_at, "
+                "surface, client_ip, user_agent, proxy_ip"
+                ") VALUES (?, 'shortlink_redirect', ?, ?, 'cli', '1.2.3.4', 'curl', '169.254.169.126')",
+                (
+                    str(_uuid.uuid4()),
+                    '{"slug": "xdZ9Rzh"}',
+                    click_time_utc.isoformat(),
+                ),
+            )
+        compute_weekly_proxy_gmv(week_start, db_path=db_path)
+
+        req_obj = request.Request(
+            f"{self.base_url}/v1/admin/gmv/proxy?week_start=2026-04-20"
+        )
+        payload = json.loads(request.urlopen(req_obj, timeout=5).read().decode("utf-8"))
+        self.assertIn("rows", payload)
+        self.assertEqual(len(payload["rows"]), 1)
+        self.assertEqual(payload["rows"][0]["surface"], "cli")
+        self.assertEqual(payload["rows"][0]["label"], "attributed_estimate")
+
+    def test_admin_click_reconciliation_endpoint_returns_null_when_missing(self):
+        """Part 6: GET /v1/admin/click-reconciliation?date=... returns 200 with null row."""
+
+        req_obj = request.Request(
+            f"{self.base_url}/v1/admin/click-reconciliation?date=2026-04-21"
+        )
+        payload = json.loads(request.urlopen(req_obj, timeout=5).read().decode("utf-8"))
+        self.assertEqual(payload["date"], "2026-04-21")
+        self.assertIsNone(payload["row"])
+
+    def test_shortlink_redirect_truncates_long_user_agent(self):
+        slug = self._seed_slug()
+
+        class NoRedirect(request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        long_ua = "A" * 500
+        req_obj = request.Request(
+            f"{self.base_url}/s/{slug}",
+            headers={"User-Agent": long_ua},
+        )
+        opener = request.build_opener(NoRedirect)
+        with self.assertRaises(error.HTTPError) as ctx:
+            opener.open(req_obj, timeout=5)
+        ctx.exception.close()
+
+        rows = self._read_shortlink_redirect_events()
+        self.assertEqual(len(rows), 1)
+        _, user_agent, _, _ = rows[0]
+        self.assertEqual(len(user_agent), 200)
 
 
 class ExtractProductsTests(unittest.TestCase):

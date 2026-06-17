@@ -4,6 +4,7 @@ from recommendation import (
     build_assist_response,
     build_search_queries,
     infer_exclusion_terms,
+    normalize_product,
     normalize_request,
     recommend_products,
 )
@@ -89,6 +90,28 @@ class RecommendationTests(unittest.TestCase):
         self.assertEqual(recommendations[0]["product_id"], "1")
         self.assertIn("원룸", recommendations[0]["rationale"])
         self.assertEqual(recommendations[0]["evidence"]["confidence"], "high")
+
+    def test_recommend_products_raises_confidence_with_landing_page_evidence(self):
+        products = [
+            {
+                "productId": 1,
+                "productName": "특대형 KF94 마스크",
+                "productPrice": 7900,
+                "productUrl": "https://example.com/1",
+                "page_title": "특대형 빅사이즈 KF94 마스크 30매",
+                "page_description": "대두도 편하게 쓸 수 있는 특대형 KF94 마스크",
+                "page_snippets": ["얼큰이 고객도 압박감이 덜한 넉넉한 핏"],
+                "page_facts": ["Landing page snippet count: 1"],
+            }
+        ]
+
+        recommendations = recommend_products(
+            query="대두가 써도 안 아픈 KF94 마스크 추천",
+            products=products,
+        )
+
+        self.assertEqual(recommendations[0]["evidence"]["confidence"], "high")
+        self.assertIn("Landing page snippet count: 1", recommendations[0]["evidence"]["facts"])
 
     def test_recommend_products_filters_generic_irrelevant_results(self):
         products = [
@@ -191,6 +214,59 @@ class RecommendationTests(unittest.TestCase):
         self.assertIn("불확실성", response["summary"])
         self.assertIn("길이 표기가 없어", response["summary"])
         self.assertIn("uncertain", " ".join(response["risks"]))
+
+    def test_normalize_product_falls_back_to_page_rating_and_review_count(self):
+        normalized = normalize_product(
+            {
+                "productId": 42,
+                "productName": "저소음 원룸 무선청소기",
+                "productPrice": 149000,
+                "productUrl": "https://example.com/p/42",
+                "page_rating": 4.6,
+                "page_review_count": 812,
+            }
+        )
+
+        self.assertEqual(normalized["rating"], 4.6)
+        self.assertEqual(normalized["review_count"], 812)
+
+    def test_normalize_product_builds_summary_from_available_text(self):
+        from_description = normalize_product({"productName": "A", "description": "쿠팡 공식 상품 설명"})
+        self.assertEqual(from_description["summary"], "쿠팡 공식 상품 설명")
+
+        from_page_description = normalize_product(
+            {"productName": "B", "page_description": "랜딩 페이지 설명"}
+        )
+        self.assertEqual(from_page_description["summary"], "랜딩 페이지 설명")
+
+        from_snippet = normalize_product(
+            {"productName": "C", "page_snippets": ["스니펫 기반 요약"]}
+        )
+        self.assertEqual(from_snippet["summary"], "스니펫 기반 요약")
+
+        when_nothing = normalize_product({"productName": "D"})
+        self.assertEqual(when_nothing["summary"], "")
+
+    def test_recommend_products_surfaces_rating_review_and_summary_on_item(self):
+        products = [
+            {
+                "productId": 7,
+                "productName": "원룸 무선청소기",
+                "productPrice": 149000,
+                "productUrl": "https://example.com/p/7",
+                "page_description": "저소음 원룸용 핸디 스틱 청소기",
+                "page_rating": 4.7,
+                "page_review_count": 945,
+            }
+        ]
+
+        recommendations = recommend_products(query="원룸 무선청소기", products=products)
+
+        self.assertEqual(len(recommendations), 1)
+        item = recommendations[0]
+        self.assertEqual(item["rating"], 4.7)
+        self.assertEqual(item["review_count"], 945)
+        self.assertEqual(item["summary"], "저소음 원룸용 핸디 스틱 청소기")
 
     def test_build_assist_response_adds_low_confidence_warning(self):
         normalized = normalize_request({"query": "무선청소기 추천"})

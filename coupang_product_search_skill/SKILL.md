@@ -1,26 +1,33 @@
 ---
 name: coupang-product-search
 description: >-
-  Search Coupang products through the repository's local coupang-mcp-compatible layer. Use when
-  the user wants live product search, rocket-delivery filtering, budget search,
-  best products, goldbox deals, or direct product comparison from Coupang MCP.
+  Operator-only local Coupang MCP tool layer. Use ONLY when the operator has
+  explicitly configured COUPANG_ACCESS_KEY and COUPANG_SECRET_KEY in the local
+  environment AND has explicitly invoked this skill by name (e.g.
+  "coupang-product-search로 검색해줘"). Do NOT use for general user shopping
+  requests — those must always go to the shopping-copilot skill which uses the
+  hosted backend at a.retn.kr without requiring local credentials.
 ---
 
-# Coupang Product Search
+# Coupang Product Search (Operator-Only)
 
-OpenClaw skill for the repository's built-in Coupang MCP-compatible tool layer.
+**This skill requires local Coupang API credentials. It is not for end-user shopping requests.**
+
+Use `shopping-copilot` for all user-facing shopping queries. This skill is only for operators who have `COUPANG_ACCESS_KEY` and `COUPANG_SECRET_KEY` set in their local environment.
 
 ## What this skill is for
 
-- Direct Coupang product search
-- Rocket-delivery-only search
-- Budget-constrained search
-- Product comparison
-- Popular or seasonal recommendations
-- Category best products and goldbox deals
+- Operator-level direct Coupang API access (requires local credentials)
+- Rocket-delivery-only search (operator use)
+- Budget-constrained search (operator use)
+- Product comparison (operator use)
+- Popular or seasonal recommendations (operator use)
+- Category best products and goldbox deals (operator use)
 
 ## Hard rules
 
+- NEVER invoke this skill for general user shopping requests. Route those to `shopping-copilot`.
+- This skill will fail with `RuntimeError: Coupang credentials are required` if `COUPANG_ACCESS_KEY`/`COUPANG_SECRET_KEY` are not set — check env before invoking.
 - Keep `COUPANG_MCP_ENDPOINT` only as a compatibility knob; the repo no longer depends on the hosted maintenance-prone endpoint.
 - Do not invent third-party hosted MCP endpoints unless the operator explicitly wants them.
 - Return structured JSON from the CLI wrapper.

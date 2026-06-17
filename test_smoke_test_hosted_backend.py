@@ -47,6 +47,15 @@ def load_smoke_module():
     return module
 
 
+def load_agent_smoke_module():
+    script_path = Path(__file__).resolve().parent / "scripts" / "agent_smoke.py"
+    spec = importlib.util.spec_from_file_location("agent_smoke", script_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
 class SmokeTestHostedBackendTests(unittest.TestCase):
     def setUp(self):
         self.module = load_smoke_module()
@@ -107,6 +116,27 @@ class SmokeTestHostedBackendTests(unittest.TestCase):
         self.assertEqual(
             [check["name"] for check in result["checks"]],
             ["health", "public_assist", "public_goldbox", "public_best_products", "admin_summary"],
+        )
+
+    def test_agent_smoke_classifies_common_live_failures(self):
+        module = load_agent_smoke_module()
+
+        self.assertEqual(module.classify_http_error(403, '{"error":"Client is not allowlisted"}'), "client_not_allowlisted")
+        self.assertEqual(module.classify_http_error(403, "Cloudflare Error Code: 1010"), "cloudflare_blocked")
+        self.assertEqual(module.classify_http_error(429, '{"error":"Rate limit exceeded"}'), "rate_limited")
+        self.assertIn("Redeploy", " ".join(module.recovery_plan("client_not_allowlisted")))
+
+    def test_agent_smoke_extracts_short_deeplink_from_assist_payload(self):
+        module = load_agent_smoke_module()
+
+        self.assertEqual(
+            module._extract_short_deeplink(
+                {
+                    "best_fit": {"short_deeplink": "https://a.retn.kr/s/abc"},
+                    "shortlist": [],
+                }
+            ),
+            "https://a.retn.kr/s/abc",
         )
 
 

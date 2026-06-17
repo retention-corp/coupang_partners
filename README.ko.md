@@ -13,6 +13,9 @@
 ## 언어
 
 - English README: [README.md](README.md)
+- Agent 사용 가이드: [docs/AGENT-USAGE.md](docs/AGENT-USAGE.md)
+- Closed-loop 운영 runbook: [docs/OPERATIONS-CLOSED-LOOP.md](docs/OPERATIONS-CLOSED-LOOP.md)
+- OpenClaw 설치/사용 가이드: [OPENCLAW-INSTALL.ko.md](OPENCLAW-INSTALL.ko.md)
 
 ## 현재 포함된 기능
 
@@ -29,6 +32,8 @@
 ## 공개 사용 경로
 
 일반 사용자나 OpenClaw 클라이언트는 `COUPANG_ACCESS_KEY`, `COUPANG_SECRET_KEY`를 설정할 필요가 없습니다. 공개 사용 경로는 hosted 서비스 `https://a.retn.kr` 입니다.
+
+OpenClaw 설치와 실제 사용자 안내 문구는 [OPENCLAW-INSTALL.ko.md](OPENCLAW-INSTALL.ko.md)를 참고하세요.
 
 ## 빠른 시작
 
@@ -79,7 +84,18 @@ python3 backend.py
 ### 공개 엔드포인트
 
 - `GET /health`
+- `GET /openapi.json`
+- `GET /docs`
 - `POST /v1/public/assist`
+- `POST /v1/public/recommendations`
+- `POST /v1/public/search`
+- `GET /v1/public/goldbox`
+- `GET /v1/public/best/{category_id}`
+- `GET /s/{slug}`
+
+공개 `/v1/public/events` 또는 `/v1/public/deeplinks` 엔드포인트는 없습니다.
+공개 호출자는 이벤트를 직접 쓰지 않고, 딥링크 생성은 추천/검색 응답 안에서
+서버 측으로 처리됩니다.
 
 ### 보호된 엔드포인트
 
@@ -90,11 +106,17 @@ python3 backend.py
 - `POST /internal/v1/deeplinks`
 - `GET /v1/admin/summary`
 
+### 에이전트 통합
+
+- 에이전트 사용 계약: [docs/AGENT-USAGE.md](docs/AGENT-USAGE.md)
+- 주기 점검/복구 루프: [docs/OPERATIONS-CLOSED-LOOP.md](docs/OPERATIONS-CLOSED-LOOP.md)
+
 선택적으로 `X-OpenClaw-Client-Id`를 함께 보낼 수 있습니다.
 
 ### 클라이언트 호환성
 
 - 공개 클라이언트는 기본적으로 token 없이 `https://a.retn.kr`의 public path를 사용합니다.
+- 외부 에이전트는 `User-Agent`, `X-OpenClaw-Client-Id`, `X-OpenClaw-Surface`, 필요 시 `X-OpenClaw-Version`를 보내는 것을 권장합니다.
 - 운영자 전용 내부 호출에서는 `OPENCLAW_SHOPPING_API_TOKEN` 또는 `OPENCLAW_SHOPPING_API_TOKENS`를 사용할 수 있습니다.
 - `OPENCLAW_SHOPPING_BASE_URL`, `OPENCLAW_SHOPPING_BACKEND_URL`, `SHOPPING_COPILOT_BASE_URL`를 지원합니다.
 - 기본 beta/public 경로에서는 stale한 localhost override가 있어도 `https://a.retn.kr`로 정규화됩니다. 예외는 `OPENCLAW_SHOPPING_ALLOW_NON_PROD_BACKEND=true`를 명시한 경우뿐입니다.
@@ -139,6 +161,17 @@ export OPENCLAW_ANALYTICS_COLLECTION_PREFIX="shopping"
 - Firestore analytics 모드는 query/recommendation/event 요약을 인스턴스 간 공유합니다.
 - `FIRESTORE_EMULATOR_HOST`가 있으면 OAuth 없이 에뮬레이터를 사용합니다.
 - Firestore short-link 생성이 실패해도 원본 affiliate URL로 폴백합니다.
+
+### Closed-loop 에이전트 점검
+
+```bash
+python3 scripts/agent_closed_loop.py
+python3 scripts/agent_closed_loop.py --deep
+```
+
+기본 shallow 점검은 `/health`, `/openapi.json`만 호출하므로 저비용입니다.
+`--deep`은 `limit=1` 추천 1회와 short-link redirect 확인 1회를 수행하므로
+배포 후 또는 3-6시간 간격 canary로만 사용하세요.
 
 ## 공개 샘플 요청
 

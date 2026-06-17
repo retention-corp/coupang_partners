@@ -12,7 +12,7 @@ The OpenClaw skill is intended to be public and forkable, but the recommendation
 
 ## Request/response contract
 
-### `POST /v1/assist`
+### `POST /v1/public/assist`
 
 Expected input:
 
@@ -29,7 +29,7 @@ Expected output:
 - explicit risks/caveats
 - deeplinks suitable for affiliate attribution
 
-### `POST /v1/events`
+### `POST /internal/v1/events`
 
 Expected event types include:
 
@@ -99,6 +99,13 @@ Recommended environment variables:
 - `OPENCLAW_SHOPPING_BASE_URL`
 - `OPENCLAW_SHOPPING_TIMEOUT_SECONDS`
 
+## Agent contract and closed loop
+
+Use [AGENT-USAGE.md](AGENT-USAGE.md) as the stable contract for Hermes,
+Codex, OpenClaw, and MCP-style wrappers. Use
+`scripts/agent_closed_loop.py` for low-cost health checks and limited deep
+canaries.
+
 ## Operator checklist
 
 1. Configure backend-only Coupang credentials.
@@ -113,7 +120,7 @@ Recommended environment variables:
 
 1. Start the backend locally or in a staging environment.
 2. Call `GET /health` and confirm machine-readable JSON.
-3. Submit a sample `POST /v1/assist` request with a realistic shopping query.
+3. Submit a sample `POST /v1/public/assist` request with a realistic shopping query.
 4. Confirm the response includes recommendations, rationale, risks, and deeplinks.
 5. Emit a sample `POST /v1/events` payload.
 6. Inspect admin summary output and confirm `total_short_links` is populated by the active shortener provider.

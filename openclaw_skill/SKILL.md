@@ -4,10 +4,21 @@ description: >-
   Hosted shopping copilot that turns a natural-language shopping request into
   evidence-backed recommendations and affiliate deeplinks. Use when the user
   wants an agent to reason about product fit or directly search shopping
-  results. Trigger when the user asks for 쇼핑 추천, 상품 추천, 뭐 사야 해,
-  골라줘, 추천해줘, 찾아줘, 검색해줘, 보여줘, 링크 줘, or gives a natural-language
-  shopping query such as "30만원 이하 무선청소기, 소음 적고 원룸용" or
-  "쿠팡에서 AUX 선 제일 긴거 제품 찾아줘".
+  results. Trigger even without the explicit `shopping-copilot` prefix when the
+  user is clearly asking to buy, compare, search, or recommend a physical
+  product. Strong triggers include 쇼핑 추천, 상품 추천, 뭐 사야 해, 골라줘,
+  추천해줘, 찾아줘, 검색해줘, 보여줘, 링크 줘, 어디서 사, 쿠팡에서, 가성비,
+  최저가, 제일 긴, 제일 싼, 평점 높은, 리뷰 많은, big size/대두/큰 머리,
+  착용감, 편하게 쓸 수 있는, 마스크, 청소기, 양말, 케이블, 오트밀크, 책,
+  도서, 자기계발서, 소설, 경제경영, 내 스타일, 내 취향, 나한테 맞는 같은
+  product-seeking phrases. Also triggers on 골드박스, 오늘 특가, 지금 특가,
+  타임딜, 당일 특가, 베스트, 인기상품, 카테고리 베스트, 전자제품 베스트,
+  로켓배송만, 로켓만, 로켓으로, 로켓 상품만. Example shopping queries include
+  "30만원 이하 무선청소기, 소음 적고 원룸용", "쿠팡에서 AUX 선 제일 긴거
+  제품 찾아줘", "머리가 큰 사람도 고통 없이 쓸 수 있는 미세먼지 마스크
+  찾아줘", "쿠팡에서 요즘 볼만한 자기계발서 3개만 찾아줘. 내 스타일을 알아보고
+  추천해라", "오늘 골드박스 뭐야?", "전자제품 베스트 보여줘",
+  "로켓배송만 무선청소기 10만원 이하".
 metadata: {"clawdbot":{"emoji":"🛒","requires":{"bins":["python3"]}}}
 ---
 
@@ -22,7 +33,10 @@ Hosted shopping copilot for OpenClaw.
 - Asking the hosted backend for grounded recommendations
 - Returning structured JSON with evidence, risks, and affiliate links
 - Matching direct Korean shopping intents without requiring explicit command syntax
+- Working even when the user does not explicitly say `shopping-copilot으로`, as long as the request is clearly a shopping/product-finding request
 - Handling comparison-style requests such as longest, cheapest, highest-rated, and most-reviewed products
+- Handling book and content-like product requests when the user is still clearly asking what to buy on Coupang
+- Handling style-aware requests such as `내 스타일`, `내 취향`, `나한테 맞는` as shopping personalization rather than generic life advice
 
 ## Hard rules
 
@@ -53,7 +67,47 @@ python3 {baseDir}/scripts/openclaw-shopping-skill.py recommend \
   --limit 5
 ```
 
+### 3) Structured search (rocket filter / budget / sort)
+
+```bash
+python3 {baseDir}/scripts/openclaw-shopping-skill.py search \
+  --backend https://a.retn.kr \
+  --keyword "무선청소기" \
+  --rocket-only \
+  --max-price 300000 \
+  --sort SALE \
+  --limit 5
+```
+
+- `--sort` options: `SIM` (관련성), `SALE` (인기), `LOW` (낮은가격), `HIGH` (높은가격)
+- Use `search` when the user says "로켓배송만", "로켓만", or specifies a budget ceiling alongside a keyword.
+
+### 4) Goldbox — today's deals
+
+```bash
+python3 {baseDir}/scripts/openclaw-shopping-skill.py goldbox \
+  --backend https://a.retn.kr
+```
+
+- Use when the user says "골드박스", "오늘 특가", "지금 특가", "타임딜", "당일 특가".
+
+### 5) Category best products
+
+```bash
+python3 {baseDir}/scripts/openclaw-shopping-skill.py best \
+  --backend https://a.retn.kr \
+  --category "전자제품"
+```
+
+- Supported category names: 여성패션, 남성패션, 유아동패션, 신발/패션잡화, 뷰티, 출산/유아동, 식품, 주방용품, 생활용품, 문구/오피스, 가전디지털 (전자제품), 스포츠/레저, 자동차용품
+- Use when the user says "베스트", "인기상품", or "카테고리 베스트".
+
 ### 2) Build deeplinks
+
+Operator-only. Use this command only when the operator has explicitly enabled
+`OPENCLAW_SHOPPING_USE_INTERNAL_API=true` and provided
+`OPENCLAW_SHOPPING_API_TOKEN`. Public agent flows should use `short_deeplink`
+returned by `recommend`, `search`, `goldbox`, or `best` instead.
 
 ```bash
 python3 {baseDir}/scripts/openclaw-shopping-skill.py deeplinks \
@@ -78,12 +132,30 @@ python3 {baseDir}/scripts/openclaw-shopping-skill.py best-products \
 
 ## Suggested agent workflow
 
-1. Ask for the user’s actual shopping constraints.
-2. Start with `recommend` for both recommendation-style and direct search-style shopping requests.
-3. Prefer the hosted backend from `OPENCLAW_SHOPPING_BASE_URL`; in closed beta, stale localhost overrides must still resolve to `https://a.retn.kr`.
-4. If no backend env is set, use the hosted default `https://a.retn.kr`.
-5. Present the best 1–3 recommendations with evidence, risks, and direct purchase links.
-6. Use `deeplinks` only when the user wants action-ready links.
+Route based on intent first:
+
+| User says | Command to use |
+|---|---|
+| "골드박스", "오늘 특가", "타임딜" | `goldbox` |
+| "베스트", "카테고리 베스트", "인기상품" | `best --category ...` |
+| "로켓배송만", "로켓만" + keyword | `search --rocket-only` |
+| keyword + budget ceiling | `search --max-price` |
+| keyword + "인기순"/"리뷰많은" | `search --sort SALE` |
+| keyword + "최저가"/"제일 싼" | `search --sort LOW` |
+| Natural language recommendation | `recommend` |
+
+1. For goldbox/best: call directly, no clarifying questions needed.
+2. For search: extract keyword, rocket preference, price ceiling, and sort intent from the user’s text.
+3. For recommend: ask for constraints if missing (budget, use case, size).
+4. Prefer the hosted backend from `OPENCLAW_SHOPPING_BASE_URL`; default is `https://a.retn.kr`.
+5. Always include `short_deeplink` (prefer over `deeplink`) for each result.
+6. If the user asks for books or taste-sensitive products, use `recommend` and personalize within the shopping flow.
+7. For book requests (책/도서/사서 추천/베스트셀러), add `"vertical": "book"` to the assist payload. The backend runs book_reco (사서추천도서 + Data4Library + Naver) and maps recommendations to Coupang products; titles without a Coupang match are dropped rather than fabricated.
+8. For personalized book ranking, attach a `persona` object to the assist payload. Supported fields: `interests` (free-text tokens), `categories`, `authors`, `avoid_categories`, `korean_preference` (0–1), `engineering_weight` (0–1). Ranking will also replay the same `X-OpenClaw-Client-Id`'s recent queries to infer an implicit persona when explicit hints are thin. Examples:
+   - `{"vertical":"book","limit":5,"persona":{"interests":["엔지니어링","프로덕트"],"avoid_categories":["육아"]}}`
+   - `{"vertical":"book","limit":3,"persona":{"categories":["자기계발"],"authors":["자청","김승호"]}}`
+   - `{"vertical":"book","limit":5,"persona":{"korean_preference":0.8,"engineering_weight":1.0}}`
+   Each matched recommendation returns a `persona_signals` array explaining which signals fired (e.g. `[{"signal":"category:자기계발","weight":5.0}]`), so the assistant can narrate *why* a pick was made.
 
 ## Trigger examples
 
@@ -91,6 +163,16 @@ python3 {baseDir}/scripts/openclaw-shopping-skill.py best-products \
 - `쿠팡에서 3.5mm 연장선 긴 거 보여줘`
 - `쿠팡에서 제일 싼 무선 마우스 찾아줘`
 - `무선청소기 추천해줘`
+- `머리가 큰 사람도 고통 없이 쓸 수 있는 미세먼지 마스크 찾아줘`
+- `대두가 써도 안 아픈 KF94 마스크 추천해줘`
+- `브레빌 870으로 라떼 만들 오트밀크 골라줘`
+- `쿠팡에서 요즘 볼만한 자기계발서 3개만 찾아줘. 내 스타일을 알아보고 추천해라`
+- `내 취향에 맞는 책 3권만 쿠팡에서 골라줘`
+- `사서 추천 도서 중에서 요즘 읽을만한거 뽑아줘`
+- `베스트셀러 소설 쿠팡에서 사려고 하는데 3권만 추천해줘`
+- `내 취향 업데이트하고 책 추천 다시 뽑아줘` (persona 페이로드 업데이트 후 assist 호출)
+- `다음에 읽을 책 3권 사서 추천에서 골라줘` (기본 trending 응답을 persona-aware ranking으로 재정렬)
+- `엔지니어링 책 중에 육아 주제는 빼고 추천해줘` (`persona.interests=["엔지니어링"]`, `avoid_categories=["육아"]` 조합)
 
 ## Backend compatibility
 

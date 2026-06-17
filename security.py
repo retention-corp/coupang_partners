@@ -63,7 +63,19 @@ def is_client_allowlisted(raw_client_id: Optional[str], allowlist: Tuple[str, ..
         return True
     if not raw_client_id:
         return False
-    return raw_client_id in allowlist
+    client_id = raw_client_id.strip()
+    for entry in allowlist:
+        rule = entry.strip()
+        if not rule:
+            continue
+        # Suffix wildcard is intentionally limited to prefix matching so deploy
+        # config can allow OpenClaw forks such as `claw-shopping` without opening
+        # broad glob semantics.
+        if rule.endswith("*") and client_id.startswith(rule[:-1]):
+            return True
+        if client_id == rule:
+            return True
+    return False
 
 
 def _read_int(value: Optional[str], default: int) -> int:

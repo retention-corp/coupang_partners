@@ -26,9 +26,9 @@ Source of truth for the agentic follow-up loop. A weekly `/schedule` cron agent 
 - [x] **P0.2 — Live smoke on production**
   `env -u COUPANG_ACCESS_KEY -u COUPANG_SECRET_KEY python3 bin/coupang_mcp.py search '무선청소기'` → returned 4 products, all with `short_url` = `https://a.retn.kr/s/...` (our affiliate short-link path).
 
-- [ ] **P0.3 — Add `coupang-mcp-fallback` to Cloud Run allowlist** 🔒 approval-required
-  Current prod allowlist: `openclaw-skill,local-cli,smoke-test`. Fallback currently pretends to be `openclaw-skill` which works, but this pollutes analytics. After we add `coupang-mcp-fallback` to `OPENCLAW_SHOPPING_CLIENT_ALLOWLIST` in `scripts/deploy_gcp_cloud_run.sh` and re-deploy, flip `_HOSTED_CLIENT_ID_DEFAULT` to `coupang-mcp-fallback` for clean per-integration attribution.
-  _Blocker:_ needs Cloud Run redeploy; do not self-execute.
+- [x] **P0.3 — Add `coupang-mcp-fallback` to Cloud Run allowlist** _(shipped via commit `bdab89f`; deployed revision `a-retn-shortener-00050-wbc`)_
+  `scripts/deploy_gcp_cloud_run.sh` now includes `coupang-mcp-fallback` in `OPENCLAW_SHOPPING_CLIENT_ALLOWLIST`, and `_HOSTED_CLIENT_ID_DEFAULT` uses that ID for clean per-integration attribution.
+  _Verification:_ deep closed-loop canary passed against `https://a.retn.kr` after deploy.
 
 ## Priority 1 — product completeness for k-skill contract
 
@@ -36,7 +36,7 @@ Source of truth for the agentic follow-up loop. A weekly `/schedule` cron agent 
   Ensure `recommendations[].rating`, `recommendations[].review_count`, `recommendations[].summary` populate on real Coupang searches (currently sometimes 0/empty). Required because vkehfdl1's core-4 feature list includes "리뷰 확인 / 상세 정보 확인".
   _Code changes:_ `product_page_evidence.py` now extracts `aggregateRating.ratingValue` / `reviewCount` from landing-page JSON-LD and allows `link.coupang.com` affiliate URLs through `build_product_page_url`. `recommendation.normalize_product` promotes `page_rating` / `page_review_count` to top-level `rating` / `review_count` fallbacks and synthesizes a new top-level `summary` (description → page_description → first snippet, capped at 280 chars). 206 tests OK.
   _Verification attempted:_ `scripts/verify_p1_1_hosted_fields.py "무선청소기 리뷰 많은 것"` hits prod for 3 candidates, runs each through the updated pipeline. All 3 failed `page_evidence_fetched=false` → Coupang Akamai returns **HTTP 403 Access Denied** to server-side `urllib` requests regardless of User-Agent (desktop/mobile) or target host (`link.coupang.com`, `www.coupang.com`, `m.coupang.com`). Reference `#18.b03a6f3d.1776691941.6d7b2fdd`. So the plumbing is ready but the data source upstream is blocked.
-  _Blockers:_ (1) Akamai anti-bot on Coupang product pages — needs a headless-browser path (Playwright) or an alternate rating source (Naver Shopping API) before these fields can populate in prod. (2) Even after (1), P0.3 redeploy gate still applies for the code to run live.
+  _Blocker:_ Akamai anti-bot on Coupang product pages — needs a headless-browser path (Playwright) or an alternate rating source (Naver Shopping API) before these fields can populate in prod.
 
 - [ ] **P1.2 — Reconcile public endpoints 404**
   vkehfdl1 confirmed `POST /v1/public/deeplinks`, `POST /v1/public/events`, `POST /v1/events`, `GET /v1/admin/summary` return 404 on production.
@@ -48,7 +48,7 @@ Source of truth for the agentic follow-up loop. A weekly `/schedule` cron agent 
 
 ## Priority 2 — reliability / revenue defense
 
-- [x] **P2.1 — Cloud Run min-instances = 1** — already set in `scripts/deploy_gcp_cloud_run.sh:8` (`MIN_INSTANCES=1`). No action needed.
+- [x] **P2.1 — Cloud Run min-instances capped for cost** — `scripts/deploy_gcp_cloud_run.sh` now defaults to `MIN_INSTANCES=0` and `MAX_INSTANCES=2`, so idle cost stays low while burst size is bounded. Raise these only for a deliberate launch window.
 
 - [ ] **P2.2 — Impression-fire rate monitoring**
   Revenue = clicks × approved rate. Instrument: weekly aggregation comparing `analytics.AnalyticsStore` recommendation count vs Coupang Partners dashboard impression count. If ratio < 0.8 for a week, flag.
