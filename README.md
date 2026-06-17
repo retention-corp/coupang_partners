@@ -91,6 +91,7 @@ Public endpoints:
 - `POST /v1/public/search`
 - `GET /v1/public/goldbox`
 - `GET /v1/public/best/{category_id}`
+- `GET /v1/public/best-products?categoryId=1016`
 - `GET /s/{slug}`
 
 There is no public `/v1/public/events` or `/v1/public/deeplinks` endpoint.
@@ -131,6 +132,7 @@ Client compatibility notes:
 
 - Thin clients default to tokenless public gateway paths under `https://a.retn.kr`
 - External agents should send `User-Agent`, `X-OpenClaw-Client-Id`, `X-OpenClaw-Surface`, and optionally `X-OpenClaw-Version`
+- Goldbox and best-products can also stay tokenless when called through the hosted public gateway
 - Thin clients accept both `OPENCLAW_SHOPPING_API_TOKEN` and `OPENCLAW_SHOPPING_API_TOKENS` for operator-only internal calls
 - Thin clients accept `OPENCLAW_SHOPPING_BASE_URL`, `OPENCLAW_SHOPPING_BACKEND_URL`, or `SHOPPING_COPILOT_BASE_URL`
 - Thin clients in the default beta path are pinned to `https://a.retn.kr`; localhost or other non-production overrides are ignored unless `OPENCLAW_SHOPPING_ALLOW_NON_PROD_BACKEND=true`

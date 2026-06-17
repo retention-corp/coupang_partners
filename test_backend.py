@@ -6,7 +6,7 @@ import unittest
 from urllib import error, request
 
 from analytics import AnalyticsStore
-from backend import _Handler, ShoppingBackend, build_server, serve_in_thread
+from backend import _Handler, ShoppingBackend, _extract_products, build_server, serve_in_thread
 from security import RateLimiter
 
 
@@ -41,6 +41,41 @@ class FakeAdapter:
 
     def deeplink(self, urls):
         return {"data": [{"originalUrl": url} for url in urls]}
+
+    def get_goldbox(self):
+        return {
+            "data": {
+                "products": [
+                    {
+                        "item": {
+                            "productId": 101,
+                            "productName": "오늘의 골드박스",
+                            "productPrice": 19900,
+                            "productUrl": "https://www.coupang.com/vp/products/101",
+                        }
+                    }
+                ]
+            }
+        }
+
+    def get_bestcategories(self, category_id):
+        return {
+            "data": {
+                "bestCategories": [
+                    {
+                        "categoryId": int(category_id),
+                        "products": [
+                            {
+                                "productId": 201,
+                                "productName": "카테고리 베스트 상품",
+                                "productPrice": 29900,
+                                "productUrl": "https://www.coupang.com/vp/products/201",
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
 
 
 class CableAdapter:
@@ -187,6 +222,25 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(response.code, 302)
         self.assertEqual(response.headers["Location"], "https://www.coupang.com/vp/products/1")
         response.close()
+
+    def test_public_goldbox_is_credentialless(self):
+        response = json.loads(request.urlopen(f"{self.base_url}/v1/public/goldbox", timeout=5).read().decode("utf-8"))
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["count"], 1)
+        self.assertEqual(response["products"][0]["productId"], 101)
+        self.assertTrue(response["products"][0]["short_url"].startswith("https://go.example.com/s/"))
+
+    def test_public_best_products_is_credentialless(self):
+        response = json.loads(
+            request.urlopen(f"{self.base_url}/v1/public/best-products?categoryId=1039", timeout=5).read().decode("utf-8")
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["category_id"], 1039)
+        self.assertEqual(response["count"], 1)
+        self.assertEqual(response["products"][0]["categoryId"], 1039)
+        self.assertTrue(response["products"][0]["short_url"].startswith("https://go.example.com/s/"))
 
     def test_assist_requires_bearer_token_when_configured(self):
         os.environ["OPENCLAW_SHOPPING_API_TOKENS"] = "token-123"
@@ -484,6 +538,35 @@ class BackendTests(unittest.TestCase):
         )
         response = json.loads(request.urlopen(request_obj, timeout=5).read().decode("utf-8"))
         self.assertEqual(response["best_fit"]["product_id"], "1")
+
+    def test_public_best_products_is_tokenless_and_shortens_links(self):
+        os.environ["OPENCLAW_SHOPPING_API_TOKENS"] = "token-123"
+
+        response = json.loads(
+            request.urlopen(f"{self.base_url}/v1/public/best-products?categoryId=1001", timeout=5).read().decode("utf-8")
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["category_id"], 1001)
+        self.assertEqual(response["count"], 1)
+        self.assertEqual(response["products"][0]["categoryId"], 1001)
+        self.assertTrue(response["products"][0]["short_url"].startswith("https://go.example.com/s/"))
+
+    def test_internal_best_products_requires_bearer_token(self):
+        os.environ["OPENCLAW_SHOPPING_API_TOKENS"] = "token-123"
+
+        with self.assertRaises(error.HTTPError) as ctx:
+            request.urlopen(f"{self.base_url}/internal/v1/best-products?categoryId=1001", timeout=5)
+
+        self.assertEqual(ctx.exception.code, 401)
+        ctx.exception.close()
+
+    def test_best_products_rejects_non_integer_category_id(self):
+        with self.assertRaises(error.HTTPError) as ctx:
+            request.urlopen(f"{self.base_url}/v1/public/best-products?categoryId=abc", timeout=5)
+
+        self.assertEqual(ctx.exception.code, 400)
+        ctx.exception.close()
 
     def test_operator_routes_can_be_disabled(self):
         os.environ["OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES"] = "false"
@@ -917,6 +1000,65 @@ class ShortlinkAttributionHandlerTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         _, user_agent, _, _ = rows[0]
         self.assertEqual(len(user_agent), 200)
+
+
+class ExtractProductsTests(unittest.TestCase):
+    """Unit tests for _extract_products covering all known Coupang response shapes."""
+
+    def test_none_returns_empty(self):
+        self.assertEqual(_extract_products(None), [])
+
+    def test_empty_dict_returns_empty(self):
+        self.assertEqual(_extract_products({}), [])
+
+    def test_plain_list_returns_as_is(self):
+        items = [{"productId": 1}, {"productId": 2}]
+        self.assertEqual(_extract_products(items), items)
+
+    def test_data_is_list(self):
+        """Coupang goldbox/bestcategories often return {"data": [...]}."""
+        items = [{"productId": 1, "productName": "A"}]
+        self.assertEqual(_extract_products({"data": items}), items)
+
+    def test_data_dict_with_productData(self):
+        """search_products returns {"data": {"productData": [...]}}."""
+        items = [{"productId": 1}]
+        self.assertEqual(_extract_products({"data": {"productData": items}}), items)
+
+    def test_data_dict_with_products(self):
+        items = [{"productId": 1}]
+        self.assertEqual(_extract_products({"data": {"products": items}}), items)
+
+    def test_data_dict_with_items(self):
+        items = [{"productId": 1}]
+        self.assertEqual(_extract_products({"data": {"items": items}}), items)
+
+    def test_top_level_products_key(self):
+        items = [{"productId": 1}]
+        self.assertEqual(_extract_products({"products": items}), items)
+
+    def test_top_level_productData_key(self):
+        items = [{"productId": 1}]
+        self.assertEqual(_extract_products({"productData": items}), items)
+
+    def test_top_level_items_key(self):
+        items = [{"productId": 1}]
+        self.assertEqual(_extract_products({"items": items}), items)
+
+    def test_data_is_empty_list(self):
+        self.assertEqual(_extract_products({"data": []}), [])
+
+    def test_envelope_with_rCode_and_data_list(self):
+        """Full Coupang envelope: {"rCode": "0", "rMessage": "", "data": [...]}."""
+        items = [{"productId": 99, "productName": "골드박스"}]
+        payload = {"rCode": "0", "rMessage": "", "data": items}
+        self.assertEqual(_extract_products(payload), items)
+
+    def test_data_is_non_list_non_dict_returns_empty(self):
+        self.assertEqual(_extract_products({"data": "unexpected"}), [])
+
+    def test_no_recognized_keys_returns_empty(self):
+        self.assertEqual(_extract_products({"foo": "bar"}), [])
 
 
 if __name__ == "__main__":

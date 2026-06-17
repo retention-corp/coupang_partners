@@ -19,11 +19,11 @@ Source of truth for the agentic follow-up loop. A weekly `/schedule` cron agent 
 
 ## Priority 0 — revenue capture (done / in flight)
 
-- [x] **P0.1 — Hosted fallback in `CoupangMcpClient`** when creds missing. _(uncommitted; pending operator commit)_
+- [x] **P0.1 — Hosted fallback in `CoupangMcpClient`** when creds missing. _(shipped via PR #1 merge commit `8fe96b6`)_
   Route `search_coupang_products` / rocket / budget / compare / recommendations / seasonal through `POST /v1/public/assist`. Goldbox + explicit bestcategories still raise `McpError` with a clear creds hint.
   _Verification:_ `python3 -m unittest -q` → 201 tests OK. `CoupangMcpHostedFallbackTests` adds 6 cases.
 
-- [x] **P0.2 — Live smoke on production** _(uncommitted; pending operator commit)_
+- [x] **P0.2 — Live smoke on production**
   `env -u COUPANG_ACCESS_KEY -u COUPANG_SECRET_KEY python3 bin/coupang_mcp.py search '무선청소기'` → returned 4 products, all with `short_url` = `https://a.retn.kr/s/...` (our affiliate short-link path).
 
 - [x] **P0.3 — Add `coupang-mcp-fallback` to Cloud Run allowlist** _(shipped via commit `bdab89f`; deployed revision `a-retn-shortener-00050-wbc`)_
@@ -32,19 +32,19 @@ Source of truth for the agentic follow-up loop. A weekly `/schedule` cron agent 
 
 ## Priority 1 — product completeness for k-skill contract
 
-- [ ] **P1.1 — Hosted `/v1/public/assist` response field hardening**
+- [~] **P1.1 — Hosted `/v1/public/assist` response field hardening** _(committed `28b2d13`; blocked on Akamai 403)_
   Ensure `recommendations[].rating`, `recommendations[].review_count`, `recommendations[].summary` populate on real Coupang searches (currently sometimes 0/empty). Required because vkehfdl1's core-4 feature list includes "리뷰 확인 / 상세 정보 확인".
-  _How:_ audit `recommendation.normalize_product`, `evidence.build_evidence`, and Coupang Partners `productData` fields; surface rating/reviewCount/summary into the top-level item, not just `metadata`.
-  _Verification:_ run `python3 scripts/smoke_test_hosted_backend.py --query '무선청소기 리뷰 많은 것'` and confirm ≥1 item has `review_count > 0` and non-empty summary.
+  _Code changes:_ `product_page_evidence.py` now extracts `aggregateRating.ratingValue` / `reviewCount` from landing-page JSON-LD and allows `link.coupang.com` affiliate URLs through `build_product_page_url`. `recommendation.normalize_product` promotes `page_rating` / `page_review_count` to top-level `rating` / `review_count` fallbacks and synthesizes a new top-level `summary` (description → page_description → first snippet, capped at 280 chars). 206 tests OK.
+  _Verification attempted:_ `scripts/verify_p1_1_hosted_fields.py "무선청소기 리뷰 많은 것"` hits prod for 3 candidates, runs each through the updated pipeline. All 3 failed `page_evidence_fetched=false` → Coupang Akamai returns **HTTP 403 Access Denied** to server-side `urllib` requests regardless of User-Agent (desktop/mobile) or target host (`link.coupang.com`, `www.coupang.com`, `m.coupang.com`). Reference `#18.b03a6f3d.1776691941.6d7b2fdd`. So the plumbing is ready but the data source upstream is blocked.
+  _Blocker:_ Akamai anti-bot on Coupang product pages — needs a headless-browser path (Playwright) or an alternate rating source (Naver Shopping API) before these fields can populate in prod.
 
-- [x] **P1.2 — Reconcile public endpoints 404** _(commit `91dd09d`)_
-  vkehfdl1's report split into two root causes:
-  - `/v1/public/deeplinks` and `/v1/public/events`: **never existed in code**, only mis-listed in `CLAUDE.md` line 67. Public callers don't write events, and deeplink minting happens server-side inside `/v1/public/assist|search` responses. CLAUDE.md updated to drop the phantom routes and list the actual public surface (`assist`, `recommendations`, `search`, `goldbox`, `best/{category_id}`, `health`, `/s/<slug>`).
-  - `/v1/events` and `/v1/admin/summary`: these **do** exist in `backend.py` but are gated by `OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES`, which is `false` on the public `a-retn-shortener` Cloud Run service by design (see `docs/openclaw-shopping-backend.md` "Production posture" + `README.md` lines 89-101). Operator traffic is meant to go through the separate `a-retn-shortener-ops` service. CLAUDE.md line 68 now states this explicitly so the next reader doesn't repeat the confusion.
-  _Verification:_ live probe of `https://a.retn.kr` after the edit:
-  - In-doc public routes (`/health`, `/v1/public/assist|recommendations|search|goldbox`, `/v1/public/best/100`) → 200/403, never 404. ✓
-  - Removed-from-doc routes (`/v1/public/events`, `/v1/public/deeplinks`) → 404, matching code reality. ✓
-  No code changes; doc-only fix. No deploy needed because the public service already serves what the new doc claims.
+- [ ] **P1.2 — Reconcile public endpoints 404**
+  vkehfdl1 confirmed `POST /v1/public/deeplinks`, `POST /v1/public/events`, `POST /v1/events`, `GET /v1/admin/summary` return 404 on production.
+  _Options (pick one):_
+  1. Deploy the missing routes if they exist in code.
+  2. Remove them from `README.md`, `docs/openclaw-shopping-backend.md`, and skill docs.
+  Whichever path, doc and deploy MUST match.
+  _Verification:_ `curl -s -o /dev/null -w "%{http_code}\n" https://a.retn.kr/v1/public/deeplinks -X POST -H "Content-Type: application/json" -d '{}'` — if kept, should be 4xx with JSON error, not 404.
 
 ## Priority 2 — reliability / revenue defense
 

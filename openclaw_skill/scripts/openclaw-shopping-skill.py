@@ -8,10 +8,11 @@ from urllib.error import HTTPError, URLError
 
 DEFAULT_HOSTED_BACKEND = "https://a.retn.kr"
 DEFAULT_ASSIST_PATH = "/v1/public/assist"
+DEFAULT_GOLDBOX_PATH = "/v1/public/goldbox"
+DEFAULT_BEST_PRODUCTS_PATH = "/v1/public/best-products"
 DEFAULT_INTERNAL_ASSIST_PATH = "/internal/v1/assist"
 DEFAULT_INTERNAL_DEEPLINK_PATH = "/internal/v1/deeplinks"
 DEFAULT_SEARCH_PATH = "/v1/public/search"
-DEFAULT_GOLDBOX_PATH = "/v1/public/goldbox"
 DEFAULT_BEST_PATH = "/v1/public/best"
 DEFAULT_USER_AGENT = "OpenClawShoppingSkill/1.0 (+https://a.retn.kr)"
 
@@ -190,6 +191,10 @@ def main() -> int:
         help='JSON object with persona hints, e.g. \'{"interests":["엔지니어링"],"avoid_categories":["육아"]}\'',
     )
 
+    best_products = subparsers.add_parser("best-products")
+    best_products.add_argument("--backend", default=_backend_base_url())
+    best_products.add_argument("--category-id", type=int, default=1016)
+
     deeplinks = subparsers.add_parser("deeplinks")
     deeplinks.add_argument("--backend", default=_backend_base_url())
     deeplinks.add_argument("--url", action="append", required=True)
@@ -253,8 +258,10 @@ def main() -> int:
         elif args.command == "best":
             category_id = _resolve_category_id(args.category)
             result = _get_json(f"{backend_base_url}{DEFAULT_BEST_PATH}/{category_id}")
+        elif args.command == "best-products":
+            result = _get_json(backend_base_url + f"{DEFAULT_BEST_PRODUCTS_PATH}?categoryId={args.category_id}")
         else:
-            result = _post_json(backend_base_url + DEFAULT_INTERNAL_DEEPLINK_PATH, {"urls": args.url})
+            raise RuntimeError(f"unsupported command: {args.command}")
         output = {"ok": True, "data": result}
         if isinstance(result, dict) and "disclosure" in result:
             output["disclosure"] = result["disclosure"]
