@@ -9,6 +9,7 @@ from urllib.error import HTTPError, URLError
 DEFAULT_BASE_URL = "https://a.retn.kr"
 DEFAULT_TIMEOUT_SECONDS = 20
 DEFAULT_QUERY = "retn hosted smoke test lightweight mask"
+DEFAULT_USER_AGENT = "OpenClawShoppingSmokeTest/1.0 (+https://a.retn.kr)"
 
 
 class SmokeTestError(RuntimeError):
@@ -43,7 +44,9 @@ def _request_json(
 ) -> Dict[str, Any]:
     headers = {
         "Content-Type": "application/json",
+        "User-Agent": os.getenv("OPENCLAW_SHOPPING_USER_AGENT", DEFAULT_USER_AGENT),
         "X-OpenClaw-Client-Id": os.getenv("OPENCLAW_SHOPPING_CLIENT_ID", "smoke-test"),
+        "X-OpenClaw-Surface": "cli",
     }
     if token:
         headers["Authorization"] = f"Bearer {token}"

@@ -1,0 +1,50 @@
+{
+  "name": "retn-coupang-shopping",
+  "description": "Hosted Coupang shopping recommendation and short-link backend for agent clients.",
+  "base_url": "https://a.retn.kr",
+  "openapi_url": "https://a.retn.kr/openapi.json",
+  "docs_url": "https://a.retn.kr/docs",
+  "auth": {
+    "public": "none",
+    "operator": "bearer"
+  },
+  "recommended_headers": {
+    "User-Agent": "<agent-name>/<version> (+https://a.retn.kr)",
+    "X-OpenClaw-Client-Id": "hermes-agent",
+    "X-OpenClaw-Surface": "mcp",
+    "X-OpenClaw-Version": "1.0.0"
+  },
+  "public_endpoints": [
+    "GET /health",
+    "GET /openapi.json",
+    "GET /docs",
+    "POST /v1/public/assist",
+    "POST /v1/public/search",
+    "GET /v1/public/goldbox",
+    "GET /v1/public/best/{category_id}",
+    "GET /s/{slug}"
+  ],
+  "mcp": {
+    "command": "python3",
+    "args": ["coupang_mcp_server.py"],
+    "tools": [
+      "search_coupang_products",
+      "search_coupang_rocket",
+      "search_coupang_budget",
+      "compare_coupang_products",
+      "get_coupang_recommendations",
+      "get_coupang_best_products",
+      "get_coupang_goldbox"
+    ]
+  },
+  "closed_loop": {
+    "shallow": "python3 scripts/agent_closed_loop.py --client-id smoke-test",
+    "deep": "python3 scripts/agent_closed_loop.py --client-id smoke-test --deep"
+  },
+  "cost_guardrails": {
+    "public_rate_limit": "12 requests per 60 seconds by deploy default",
+    "cloud_run_max_instances_default": 2,
+    "response_cache_ttl_seconds_default": 900,
+    "deep_canary": "limit=1, low cadence only"
+  }
+}

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -14,6 +13,7 @@ DEFAULT_INTERNAL_DEEPLINK_PATH = "/internal/v1/deeplinks"
 DEFAULT_SEARCH_PATH = "/v1/public/search"
 DEFAULT_GOLDBOX_PATH = "/v1/public/goldbox"
 DEFAULT_BEST_PATH = "/v1/public/best"
+DEFAULT_USER_AGENT = "OpenClawShoppingSkill/1.0 (+https://a.retn.kr)"
 
 CATEGORY_MAP = {
     "여성패션": "1001", "여성": "1001", "여성의류": "1001",
@@ -68,6 +68,17 @@ def _use_internal_api() -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+def _require_internal_api(command: str) -> None:
+    if not _use_internal_api():
+        raise RuntimeError(
+            f"{command} uses operator-only internal APIs; set "
+            "OPENCLAW_SHOPPING_USE_INTERNAL_API=true and provide "
+            "OPENCLAW_SHOPPING_API_TOKEN only in an operator environment"
+        )
+    if not _auth_token():
+        raise RuntimeError(f"{command} requires OPENCLAW_SHOPPING_API_TOKEN")
+
+
 def _normalize_backend_base_url(url: str) -> str:
     candidate = (url or "").strip() or DEFAULT_HOSTED_BACKEND
     if _allow_non_prod_backend():
@@ -108,29 +119,24 @@ def _validate_backend_url(url: str) -> None:
 def _derive_client_id() -> str:
     """Stable per-caller identifier for analytics replay.
 
-    Precedence: explicit env override → OpenClaw runtime var → hash(user@host).
-    Hashing avoids leaking the OS username into server-side logs while still
-    giving the same machine a stable tag across sessions. Falls back to the
-    literal "openclaw-skill" only when no signal at all is available.
+    Precedence: explicit env override → public skill id. Production may enforce
+    an exact client allowlist, so the default must remain the allowlisted
+    `openclaw-skill` identifier rather than a per-machine derived variant.
     """
 
     explicit = (os.getenv("OPENCLAW_SHOPPING_CLIENT_ID") or "").strip()
     if explicit:
         return explicit[:128]
-    openclaw = (os.getenv("OPENCLAW_CLIENT_ID") or "").strip()
-    if openclaw:
-        return f"openclaw:{openclaw[:120]}"
-    user = (os.getenv("USER") or os.getenv("LOGNAME") or "").strip()
-    host = (os.getenv("HOSTNAME") or os.getenv("HOST") or "").strip()
-    if user or host:
-        digest = hashlib.sha256(f"{user}@{host}".encode("utf-8")).hexdigest()[:16]
-        return f"openclaw-skill-{digest}"
     return "openclaw-skill"
 
 
 def _http_json(url: str, *, method: str = "GET", payload=None):
     _validate_backend_url(url)
-    headers = {"X-OpenClaw-Client-Id": _derive_client_id()}
+    headers = {
+        "User-Agent": os.getenv("OPENCLAW_SHOPPING_USER_AGENT", DEFAULT_USER_AGENT),
+        "X-OpenClaw-Client-Id": _derive_client_id(),
+        "X-OpenClaw-Surface": "openclaw-skill",
+    }
     body = None
     if payload is not None:
         headers["Content-Type"] = "application/json"
@@ -231,6 +237,7 @@ def main() -> int:
             assist_path = DEFAULT_INTERNAL_ASSIST_PATH if _use_internal_api() else DEFAULT_ASSIST_PATH
             result = _post_json(backend_base_url + assist_path, payload)
         elif args.command == "deeplinks":
+            _require_internal_api("deeplinks")
             result = _post_json(backend_base_url + DEFAULT_INTERNAL_DEEPLINK_PATH, {"urls": args.url})
         elif args.command == "search":
             payload = {

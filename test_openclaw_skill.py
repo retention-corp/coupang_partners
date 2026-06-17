@@ -160,6 +160,31 @@ class OpenClawSkillTests(unittest.TestCase):
                 "http://127.0.0.1:9883",
             )
 
+    def test_deeplinks_requires_operator_internal_api_mode(self):
+        env = dict(os.environ)
+        env["OPENCLAW_SHOPPING_BASE_URL"] = self.base_url
+        env["OPENCLAW_SHOPPING_ALLOW_NON_PROD_BACKEND"] = "true"
+        env.pop("OPENCLAW_SHOPPING_USE_INTERNAL_API", None)
+        env.pop("OPENCLAW_SHOPPING_API_TOKEN", None)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "openclaw_skill/scripts/openclaw-shopping-skill.py",
+                "deeplinks",
+                "--url",
+                "https://www.coupang.com/vp/products/1",
+            ],
+            cwd=os.getcwd(),
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 1)
+        payload = json.loads(completed.stderr)
+        self.assertIn("operator-only internal APIs", payload["error"]["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

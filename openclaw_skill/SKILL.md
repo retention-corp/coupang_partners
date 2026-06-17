@@ -104,6 +104,11 @@ python3 {baseDir}/scripts/openclaw-shopping-skill.py best \
 
 ### 2) Build deeplinks
 
+Operator-only. Use this command only when the operator has explicitly enabled
+`OPENCLAW_SHOPPING_USE_INTERNAL_API=true` and provided
+`OPENCLAW_SHOPPING_API_TOKEN`. Public agent flows should use `short_deeplink`
+returned by `recommend`, `search`, `goldbox`, or `best` instead.
+
 ```bash
 python3 {baseDir}/scripts/openclaw-shopping-skill.py deeplinks \
   --backend https://a.retn.kr \

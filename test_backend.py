@@ -293,6 +293,45 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 403)
         ctx.exception.close()
 
+    def test_public_allowlist_accepts_prefix_wildcard_client(self):
+        os.environ["OPENCLAW_SHOPPING_CLIENT_ALLOWLIST_ENABLED"] = "true"
+        os.environ["OPENCLAW_SHOPPING_CLIENT_ALLOWLIST"] = "openclaw-skill-*,hermes-agent"
+        request_obj = request.Request(
+            f"{self.base_url}/v1/public/assist",
+            data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-OpenClaw-Client-Id": "openclaw-skill-localhash",
+            },
+            method="POST",
+        )
+        response = json.loads(request.urlopen(request_obj, timeout=5).read().decode("utf-8"))
+        self.assertIn("best_fit", response)
+
+    def test_allowlisted_public_clients_get_separate_rate_buckets(self):
+        os.environ["OPENCLAW_SHOPPING_CLIENT_ALLOWLIST_ENABLED"] = "true"
+        os.environ["OPENCLAW_SHOPPING_CLIENT_ALLOWLIST"] = "agent-a,agent-b"
+        _Handler.public_rate_limiter = RateLimiter(window_seconds=60, max_requests=1)
+        request_a = request.Request(
+            f"{self.base_url}/v1/public/assist",
+            data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-OpenClaw-Client-Id": "agent-a"},
+            method="POST",
+        )
+        request_b = request.Request(
+            f"{self.base_url}/v1/public/assist",
+            data=json.dumps({"query": "30만원 이하 무선청소기"}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-OpenClaw-Client-Id": "agent-b"},
+            method="POST",
+        )
+
+        request.urlopen(request_a, timeout=5).read()
+        request.urlopen(request_b, timeout=5).read()
+        with self.assertRaises(error.HTTPError) as ctx:
+            request.urlopen(request_a, timeout=5)
+        self.assertEqual(ctx.exception.code, 429)
+        ctx.exception.close()
+
     def test_public_and_authenticated_buckets_are_separate(self):
         _Handler.rate_limiter = RateLimiter(window_seconds=60, max_requests=30)
         _Handler.public_rate_limiter = RateLimiter(window_seconds=60, max_requests=1)
@@ -563,7 +602,7 @@ class BackendTests(unittest.TestCase):
             "/v1/public/assist",
             "/v1/public/search",
             "/v1/public/goldbox",
-            "/v1/public/best/{category}",
+            "/v1/public/best/{category_id}",
             "/s/{slug}",
         ):
             self.assertIn(expected, paths, f"expected path {expected} in OpenAPI doc")

@@ -21,6 +21,29 @@ Remaining:
 Done in repo:
 - Thin clients now accept both singular/plural auth token env forms
 - Thin clients now accept compatible backend URL env aliases to reduce schema drift at the repo boundary
+- Agent-facing usage docs and machine-readable manifest now exist at `docs/AGENT-USAGE.md` and `agent_manifest.json`
+- Agent contract diagnostics now exist at `scripts/agent_smoke.py`
+- Closed-loop operations diagnostics now exist at `scripts/agent_closed_loop.py`
+- Optional admin/cost-threshold diagnostics exist at `scripts/closed_loop_check.py`
+- Prefix allowlist entries such as `openclaw-skill-*` are supported
+
+## Agent Integration / Closed-Loop Ops
+
+### 1. Keep generic agent onboarding frictionless
+
+Done already:
+- `docs/AGENT-USAGE.md` documents HTTP, CLI, MCP-compatible client, client ids, headers, and failure kinds.
+- `agent_manifest.json` exposes the machine-readable production contract.
+- `scripts/agent_smoke.py` runs a cheap E2E check and classifies failures.
+- `scripts/agent_closed_loop.py` runs shallow scheduled checks or deep assist/shortlink canaries with recovery actions.
+- `scripts/closed_loop_check.py` wraps smoke with optional admin/cost guard checks.
+- `scripts/closed_loop_ops.py` provides an opt-in recovery controller; report-only unless `--auto-recover` is passed.
+- `.github/workflows/agent-ops-check.yml` runs the shallow public closed-loop check hourly.
+
+Remaining:
+- Add a true standalone stdio MCP server for Coupang shopping tools if target agents require MCP server process attachment instead of the current in-process MCP-compatible client.
+- Add platform-specific manifests if Hermes or another agent runtime requires a stricter schema than `agent_manifest.json`.
+- Wire admin/cost thresholds into a secret-backed scheduled environment if the hourly public check is not enough.
 
 ## Stability
 
@@ -68,6 +91,7 @@ Remaining:
 
 Done in repo:
 - Optional client allowlist mode via `OPENCLAW_SHOPPING_CLIENT_ALLOWLIST_ENABLED`
+- Allowlist entries now support exact matches and trailing `*` prefix wildcards such as `claw-*`
 - Optional separate public/auth/admin rate-limit buckets via env-specific overrides
 
 ### 4. Improve recommendation quality
@@ -102,6 +126,12 @@ Remaining:
 - Ensure latest hardened revision stays deployed after future changes
 - Keep Cloud Build / Artifact Registry permissions documented
 - If source deploy fails again, use the image-build fallback path
+- Wire `scripts/agent_closed_loop.py` into the chosen CI or scheduler runner
+- Run `scripts/agent_closed_loop.py --deep` after every production deploy
+
+Done in repo:
+- Closed-loop check and recovery classification exist at `scripts/agent_closed_loop.py`
+- Operations runbook exists at `docs/OPERATIONS-CLOSED-LOOP.md`
 
 ### 2. Remove local secret convenience paths from normal operator workflow
 
@@ -118,5 +148,6 @@ Target:
 2. Firestore migration for short-links
 3. Analytics shared-store migration
 4. Stricter auth / quota policy
-5. Recommendation quality improvements
-6. Production docs cleanup
+5. Closed-loop alert sink and recovery ownership
+6. Recommendation quality improvements
+7. Production docs cleanup

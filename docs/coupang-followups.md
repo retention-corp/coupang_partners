@@ -48,7 +48,7 @@ Source of truth for the agentic follow-up loop. A weekly `/schedule` cron agent 
 
 ## Priority 2 — reliability / revenue defense
 
-- [x] **P2.1 — Cloud Run min-instances = 1** — already set in `scripts/deploy_gcp_cloud_run.sh:8` (`MIN_INSTANCES=1`). No action needed.
+- [x] **P2.1 — Cloud Run min-instances capped for cost** — `scripts/deploy_gcp_cloud_run.sh` now defaults to `MIN_INSTANCES=0` and `MAX_INSTANCES=2`, so idle cost stays low while burst size is bounded. Raise these only for a deliberate launch window.
 
 - [ ] **P2.2 — Impression-fire rate monitoring**
   Revenue = clicks × approved rate. Instrument: weekly aggregation comparing `analytics.AnalyticsStore` recommendation count vs Coupang Partners dashboard impression count. If ratio < 0.8 for a week, flag.

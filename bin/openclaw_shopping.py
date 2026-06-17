@@ -14,6 +14,7 @@ DEFAULT_TIMEOUT_SECONDS = 30
 DEFAULT_HOSTED_BACKEND = "https://a.retn.kr"
 DEFAULT_PUBLIC_PATH = "/v1/public/assist"
 DEFAULT_INTERNAL_PATH = "/internal/v1/assist"
+DEFAULT_USER_AGENT = "OpenClawShoppingCLI/1.0 (+https://a.retn.kr)"
 
 
 class CliError(RuntimeError):
@@ -193,7 +194,11 @@ def request_assist(base_url: str, payload: Dict[str, Any], timeout: int) -> Any:
     path = DEFAULT_INTERNAL_PATH if _use_internal_api() else DEFAULT_PUBLIC_PATH
     url = f"{normalized_base_url}{path}"
     body = json.dumps(payload).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": os.getenv("OPENCLAW_SHOPPING_USER_AGENT", DEFAULT_USER_AGENT),
+        "X-OpenClaw-Surface": "cli",
+    }
     auth_token = _auth_token_from_env()
     client_id = os.getenv("OPENCLAW_SHOPPING_CLIENT_ID", "local-cli")
     if auth_token and _use_internal_api():

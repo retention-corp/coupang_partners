@@ -1,6 +1,8 @@
 # Coupang Partners Client and OpenClaw Shopping Backend
 
 - Korean README: [README.ko.md](README.ko.md)
+- Agent usage guide: [AGENT-USAGE.md](AGENT-USAGE.md), [docs/AGENT-USAGE.md](docs/AGENT-USAGE.md)
+- Closed-loop operations runbook: [docs/OPERATIONS-CLOSED-LOOP.md](docs/OPERATIONS-CLOSED-LOOP.md)
 - OpenClaw install/use guide (Korean): [OPENCLAW-INSTALL.ko.md](OPENCLAW-INSTALL.ko.md)
 
 Minimal Python tooling for Coupang Partners integrations using only the standard library.
@@ -12,6 +14,8 @@ This repository now ships:
 - a sqlite-backed analytics loop for recommendation feedback
 - a public OpenClaw skill package under `openclaw_skill/`
 - a thin CLI bridge under `bin/openclaw_shopping.py`
+- agent smoke and closed-loop checks under `scripts/agent_smoke.py`, `scripts/agent_closed_loop.py`, and `scripts/closed_loop_check.py`
+- a machine-readable agent manifest at `agent_manifest.json`
 
 ## What exists today
 
@@ -80,23 +84,45 @@ Do not present the operator-only local backend flow as the default path for publ
 Public endpoints:
 
 - `GET /health`
+- `GET /openapi.json`
+- `GET /docs`
 - `POST /v1/public/assist`
-- `POST /v1/public/events`
-- `POST /v1/public/deeplinks`
+- `POST /v1/public/recommendations`
+- `POST /v1/public/search`
+- `GET /v1/public/goldbox`
+- `GET /v1/public/best/{category_id}`
+- `GET /s/{slug}`
+
+There is no public `/v1/public/events` or `/v1/public/deeplinks` endpoint.
+Public callers do not write events directly, and deeplink minting is
+server-side inside recommendation/search responses.
+
+Agent/Hermes usage and operations:
+
+- [docs/AGENT-USAGE.md](docs/AGENT-USAGE.md)
+- [docs/OPERATIONS-CLOSED-LOOP.md](docs/OPERATIONS-CLOSED-LOOP.md)
 
 Protected endpoints require:
 
 - `Authorization: Bearer <token>` when calling internal or admin endpoints
-- optional `X-OpenClaw-Client-Id` for caller identification
+- optional `X-OpenClaw-Client-Id`, `X-OpenClaw-Surface`, and `X-OpenClaw-Version` for caller attribution
 - `POST /internal/v1/assist`
 - `POST /internal/v1/events`
 - `POST /internal/v1/deeplinks`
 - `GET /v1/admin/summary`
 
+Agent integration:
+
+- Agent manifest: [agent_manifest.json](agent_manifest.json)
+- Top-level agent usage contract: [AGENT-USAGE.md](AGENT-USAGE.md)
+- Agent usage contract: [docs/AGENT-USAGE.md](docs/AGENT-USAGE.md)
+- Closed-loop operations: [docs/OPERATIONS-CLOSED-LOOP.md](docs/OPERATIONS-CLOSED-LOOP.md)
+- Agent canary loop: [docs/AGENTIC-CLOSED-LOOP.md](docs/AGENTIC-CLOSED-LOOP.md)
+
 Optional hardening env vars:
 
 - `OPENCLAW_SHOPPING_CLIENT_ALLOWLIST_ENABLED=true` to enforce caller allowlisting
-- `OPENCLAW_SHOPPING_CLIENT_ALLOWLIST=shopping-copilot,discord-bot` for approved client IDs
+- `OPENCLAW_SHOPPING_CLIENT_ALLOWLIST=openclaw-skill,openclaw-skill-*,local-cli,smoke-test,agent-smoke,closed-loop-monitor,github-actions-agent-ops,coupang-mcp-fallback,hermes-agent,codex,claude-code-skill,chatgpt-gpt,claw-*` for approved client IDs. Entries support exact matches and trailing `*` prefix wildcards.
 - `OPENCLAW_SHOPPING_RATE_LIMIT_REQUESTS_PUBLIC` / `OPENCLAW_SHOPPING_RATE_LIMIT_WINDOW_SECONDS_PUBLIC`
 - `OPENCLAW_SHOPPING_RATE_LIMIT_REQUESTS_AUTH` / `OPENCLAW_SHOPPING_RATE_LIMIT_WINDOW_SECONDS_AUTH`
 - `OPENCLAW_SHOPPING_RATE_LIMIT_REQUESTS_ADMIN` / `OPENCLAW_SHOPPING_RATE_LIMIT_WINDOW_SECONDS_ADMIN`
@@ -104,6 +130,7 @@ Optional hardening env vars:
 Client compatibility notes:
 
 - Thin clients default to tokenless public gateway paths under `https://a.retn.kr`
+- External agents should send `User-Agent`, `X-OpenClaw-Client-Id`, `X-OpenClaw-Surface`, and optionally `X-OpenClaw-Version`
 - Thin clients accept both `OPENCLAW_SHOPPING_API_TOKEN` and `OPENCLAW_SHOPPING_API_TOKENS` for operator-only internal calls
 - Thin clients accept `OPENCLAW_SHOPPING_BASE_URL`, `OPENCLAW_SHOPPING_BACKEND_URL`, or `SHOPPING_COPILOT_BASE_URL`
 - Thin clients in the default beta path are pinned to `https://a.retn.kr`; localhost or other non-production overrides are ignored unless `OPENCLAW_SHOPPING_ALLOW_NON_PROD_BACKEND=true`
@@ -130,7 +157,7 @@ If you are testing internal/operator flows against a non-local host, also set
 
 Local development is intentionally a separate override path. Public docs and install defaults should keep pointing at `https://a.retn.kr`.
 
-When enabled, recommendation responses include `short_deeplink`, and `/v1/deeplinks` includes `shortenedShareUrl`.
+When enabled, recommendation and search responses include `short_deeplink`.
 The backend also exposes `GET /s/<slug>` and redirects to the original affiliate URL.
 
 Shared Firestore short-link provider for Cloud Run:
@@ -150,6 +177,17 @@ Notes:
 - Firestore analytics mode keeps query/recommendation/event summaries shared across instances.
 - If `FIRESTORE_EMULATOR_HOST` is set, the backend talks to the emulator without OAuth.
 - If Firestore short-link generation fails, the backend now falls back to the original affiliate URL instead of dropping the request.
+
+Closed-loop agent checks:
+
+```bash
+python3 scripts/agent_closed_loop.py
+python3 scripts/agent_closed_loop.py --deep
+```
+
+The default shallow check only calls `/health` and `/openapi.json`. Use `--deep`
+sparingly; it makes one `limit=1` public assist call and verifies the generated
+short link.
 
 Public sample request:
 
@@ -180,6 +218,20 @@ python3 bin/openclaw_shopping.py \
   --must-have 원룸 \
   --avoid 대형 \
   --evidence-snippet "리뷰: 자취방에서 쓰기 좋은 보조 청소기"
+```
+
+Deep agent contract canary:
+
+```bash
+python3 scripts/agent_closed_loop.py --deep --client-id smoke-test --surface cli
+python3 scripts/agent_closed_loop.py --deep --client-id hermes-agent --surface hermes-agent
+```
+
+Closed-loop operations check:
+
+```bash
+python3 scripts/agent_closed_loop.py
+python3 scripts/agent_closed_loop.py --deep --client-id smoke-test --surface cli
 ```
 
 Operator/internal example:

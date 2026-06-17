@@ -14,7 +14,8 @@ from client import CoupangPartnersClient
 
 _DEFAULT_HOSTED_BACKEND = "https://a.retn.kr"
 _PUBLIC_ASSIST_PATH = "/v1/public/assist"
-_HOSTED_CLIENT_ID_DEFAULT = "openclaw-skill"
+_HOSTED_CLIENT_ID_DEFAULT = "coupang-mcp-fallback"
+_HOSTED_USER_AGENT_DEFAULT = "OpenClawCoupangMCP/1.0 (+https://a.retn.kr)"
 
 
 def _hosted_client_id() -> str:
@@ -45,7 +46,9 @@ class _HostedAssistClient:
             method="POST",
             headers={
                 "Content-Type": "application/json",
+                "User-Agent": os.getenv("OPENCLAW_SHOPPING_USER_AGENT", _HOSTED_USER_AGENT_DEFAULT),
                 "X-OpenClaw-Client-Id": _hosted_client_id(),
+                "X-OpenClaw-Surface": "mcp",
             },
         )
         try:

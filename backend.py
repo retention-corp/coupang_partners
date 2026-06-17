@@ -56,6 +56,7 @@ _SURFACE_ENUM = frozenset(
         "chatgpt-gpt",
         "codex",
         "claude-project",
+        "hermes-agent",
         "openclaw-skill",
         "cli",
         "mcp",
@@ -182,7 +183,7 @@ _OPENAPI_ATTRIBUTION_HEADER_PARAMS: List[Dict[str, Any]] = [
         "in": "header",
         "description": (
             "Caller surface tag. Known values: claude-code-skill, chatgpt-gpt, codex, "
-            "claude-project, openclaw-skill, cli, mcp. Values matching the `claw-*` prefix "
+            "claude-project, hermes-agent, openclaw-skill, cli, mcp. Values matching the `claw-*` prefix "
             "(e.g., claw-shopping) are also accepted. Anything else is normalized server-side "
             "to 'unknown' with the raw value preserved in analytics (never rejected)."
         ),
@@ -194,6 +195,7 @@ _OPENAPI_ATTRIBUTION_HEADER_PARAMS: List[Dict[str, Any]] = [
                 "chatgpt-gpt",
                 "codex",
                 "claude-project",
+                "hermes-agent",
                 "openclaw-skill",
                 "cli",
                 "mcp",
@@ -381,13 +383,13 @@ _OPENAPI_DOCUMENT: Dict[str, Any] = {
                 },
             }
         },
-        "/v1/public/best/{category}": {
+        "/v1/public/best/{category_id}": {
             "get": {
                 "summary": "Coupang best-sellers by category",
                 "description": "Returns best-sellers for a numeric Coupang category id.",
                 "parameters": [
                     {
-                        "name": "category",
+                        "name": "category_id",
                         "in": "path",
                         "required": True,
                         "description": "Coupang category id (numeric string).",
@@ -1406,11 +1408,12 @@ class _Handler(BaseHTTPRequestHandler):
         client_id = self.headers.get("X-OpenClaw-Client-Id")
         allowlist = shopping_client_allowlist_from_env()
         allowlist_enabled = shopping_client_allowlist_enabled_from_env()
-        if allowlist_enabled and not is_client_allowlisted(client_id, allowlist, allowlist_enabled):
+        allowlisted_client = is_client_allowlisted(client_id, allowlist, allowlist_enabled)
+        if allowlist_enabled and not allowlisted_client:
             raise BackendError(HTTPStatus.FORBIDDEN, "Client is not allowlisted")
         client_marker = summarize_client(remote_addr, client_id, None)
         rate_limiter = self.public_rate_limiter or self.rate_limiter
-        limiter_key = rate_limit_key(remote_addr, client_id, None, allowlisted_client=False)
+        limiter_key = rate_limit_key(remote_addr, client_id, None, allowlisted_client=allowlisted_client)
         if rate_limiter and not rate_limiter.allow(limiter_key):
             raise BackendError(HTTPStatus.TOO_MANY_REQUESTS, "Rate limit exceeded")
         log_event("request_authorized", request_id=request_id, path=self.path, remote_addr=remote_addr, client=client_marker)

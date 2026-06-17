@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "retn-coupang-shopping": {
+      "command": "python3",
+      "args": ["/Users/gyusupsim/Projects/products/coupang_partners/coupang_mcp_server.py"],
+      "env": {
+        "OPENCLAW_SHOPPING_BASE_URL": "https://a.retn.kr",
+        "OPENCLAW_SHOPPING_CLIENT_ID": "hermes-agent",
+        "OPENCLAW_SHOPPING_USER_AGENT": "HermesAgent/1.0 (+https://a.retn.kr)",
+        "OPENCLAW_SHOPPING_FORCE_HOSTED": "1"
+      }
+    }
+  }
+}
