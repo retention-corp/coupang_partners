@@ -125,11 +125,14 @@ class CoupangPartnersClient:
             payload = json.loads(raw) if raw else {"message": exc.reason}
             raise CoupangApiError(exc.code, payload) from exc
 
-    def deeplink(self, coupang_urls: List[str]) -> Any:
+    def deeplink(self, coupang_urls: List[str], *, sub_id: Optional[str] = None) -> Any:
+        body: Dict[str, Any] = {"coupangUrls": coupang_urls}
+        if sub_id:
+            body["subId"] = sub_id
         return self.request(
             "POST",
             f"{V1_PREFIX}/deeplink",
-            json_body={"coupangUrls": coupang_urls},
+            json_body=body,
         )
 
     def get_bestcategories(self, category_id: Union[int, str]) -> Any:

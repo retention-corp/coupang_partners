@@ -3,10 +3,11 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from http import HTTPStatus
 from urllib import error, request
 
 from analytics import AnalyticsStore
-from backend import _Handler, ShoppingBackend, _extract_products, build_server, serve_in_thread
+from backend import BackendError, _Handler, ShoppingBackend, _extract_products, build_server, serve_in_thread
 from security import RateLimiter
 
 
@@ -469,6 +470,36 @@ class BackendTests(unittest.TestCase):
             request.urlopen(request_obj, timeout=5)
         self.assertEqual(ctx.exception.code, 400)
         ctx.exception.close()
+
+    def test_deeplinks_forward_sub_id_to_the_adapter(self):
+        class SubIdAdapter(FakeAdapter):
+            def __init__(self):
+                self.calls = []
+
+            def deeplink(self, urls, *, sub_id=None):
+                self.calls.append((list(urls), sub_id))
+                return {"data": [{"originalUrl": url} for url in urls]}
+
+        adapter = SubIdAdapter()
+        backend = ShoppingBackend(
+            adapter=adapter,
+            analytics_store=AnalyticsStore(f"{self.tempdir.name}/sub-id.sqlite3"),
+        )
+        url = "https://www.coupang.com/vp/products/1"
+
+        backend.deeplinks({"urls": [url]})
+        backend.deeplinks({"urls": [url], "subId": "blog-2026"})
+
+        self.assertEqual(adapter.calls, [([url], None), ([url], "blog-2026")])
+
+    def test_deeplinks_reject_invalid_sub_id(self):
+        backend = ShoppingBackend(
+            adapter=FakeAdapter(),
+            analytics_store=AnalyticsStore(f"{self.tempdir.name}/bad-sub-id.sqlite3"),
+        )
+        with self.assertRaises(BackendError) as ctx:
+            backend.deeplinks({"urls": ["https://www.coupang.com/vp/products/1"], "subId": "bad id!"})
+        self.assertEqual(ctx.exception.status, HTTPStatus.BAD_REQUEST)
 
     def test_assist_falls_back_to_original_link_when_shortener_fails(self):
         class FailingShortener:

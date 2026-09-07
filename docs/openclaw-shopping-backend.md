@@ -37,6 +37,28 @@ Expected event types include:
 - `deeplink_clicked`
 - future outcome signals such as conversion-related feedback
 
+### `POST /v1/deeplinks` (operator, bearer auth)
+
+Mints affiliate deeplinks through the Coupang Partners open API using the
+backend's credentials, so commission is attributed to the account that owns
+those keys. Rewriting an `lptag` by hand does **not** attribute revenue.
+
+Request body:
+
+- `urls` (required): list of Coupang product URLs. Hosts are checked against
+  the deeplink allowlist (`coupang.com`, `link.coupang.com`, `www.coupang.com`).
+- `subId` (optional): channel/sub id for per-channel revenue reporting.
+  Validated as 1-32 chars of `[A-Za-z0-9_-]`; anything else returns 400.
+
+Each response item carries the Coupang `shortenUrl` plus `shortenedShareUrl`,
+the link rewritten onto our own shortener domain (`https://a.retn.kr/s/...`)
+when a shortener is configured. Share `shortenedShareUrl`.
+
+Re-minting somebody else's shared link is scripted in
+`scripts/make_my_deeplink.py` — it resolves the `link.coupang.com` short link,
+strips the other partner's tracking params, and calls this route (or the
+Coupang API directly with `--mode direct`).
+
 ### `GET /v1/admin/summary`
 
 Operators should be able to inspect:

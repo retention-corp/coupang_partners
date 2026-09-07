@@ -28,6 +28,10 @@ python3 backend.py                       # or: scripts/run_openclaw_backend.fish
 # Thin CLI bridge against hosted backend (no secrets needed)
 python3 bin/openclaw_shopping.py "30만원 이하 무선청소기, 원룸용"
 
+# Re-mint any Coupang URL (incl. another partner's short link) as your own deeplink + short link
+export OPENCLAW_SHOPPING_API_TOKEN=...  OPENCLAW_SHOPPING_OPS_BASE_URL=https://<ops-host>
+python3 scripts/make_my_deeplink.py https://link.coupang.com/a/XXXXXXXX --sub-id blog
+
 # Smoke-test the live hosted backend
 python3 scripts/smoke_test_hosted_backend.py
 

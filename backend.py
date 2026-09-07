@@ -42,6 +42,7 @@ from security import (
     shopping_client_allowlist_from_env,
     summarize_client,
     validate_deeplink_url,
+    validate_sub_id,
     validate_payload_limits,
 )
 from url_shortener import BuiltinShortener, FirestoreShortener, UrlShortener
@@ -780,8 +781,13 @@ class ShoppingBackend:
         invalid_urls = [url for url in urls if not validate_deeplink_url(str(url), self.allowed_deeplink_hosts)]
         if invalid_urls:
             raise BackendError(HTTPStatus.BAD_REQUEST, "Only approved Coupang URLs may be shortened")
+        sub_id = payload.get("subId") or payload.get("sub_id")
+        if sub_id is not None and not validate_sub_id(str(sub_id)):
+            raise BackendError(HTTPStatus.BAD_REQUEST, "'subId' must be 1-32 chars of [A-Za-z0-9_-]")
         if hasattr(self.adapter, "deeplink"):
-            response = self.adapter.deeplink(urls)
+            response = (
+                self.adapter.deeplink(urls, sub_id=str(sub_id)) if sub_id else self.adapter.deeplink(urls)
+            )
             return {"ok": True, "data": self._attach_short_links_to_deeplink_response(response)}
         raise BackendError(HTTPStatus.NOT_IMPLEMENTED, "Adapter does not support deeplink().")
 

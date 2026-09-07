@@ -1,4 +1,5 @@
 import ipaddress
+import re
 import hashlib
 import json
 import os
@@ -188,6 +189,14 @@ def validate_deeplink_url(url: str, allowed_hosts: Iterable[str]) -> bool:
         return False
     normalized_hosts = tuple(entry.lower().strip() for entry in allowed_hosts if entry.strip())
     return any(host == allowed or host.endswith(f".{allowed}") for allowed in normalized_hosts)
+
+
+_SUB_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+
+
+def validate_sub_id(sub_id: str) -> bool:
+    """Coupang Partners channel/sub id used for per-channel revenue attribution."""
+    return bool(_SUB_ID_PATTERN.match(sub_id or ""))
 
 
 class RateLimiter:
