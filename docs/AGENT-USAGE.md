@@ -11,7 +11,10 @@ Partner credentials.
 - Human-readable docs: `https://a.retn.kr/docs`
 - Public calls are tokenless.
 - Do not ask users for `COUPANG_ACCESS_KEY` or `COUPANG_SECRET_KEY`.
-- Prefer `short_deeplink` over `deeplink` in user-facing answers.
+- Use `short_deeplink` exclusively in user-facing answers.
+- `deeplink` is a deprecated compatibility field. Never print, publish, or persist it.
+- If `short_deeplink` is missing, return a temporary link-unavailable message and
+  report the failure; do not silently expose `deeplink`.
 - Include affiliate disclosure anywhere links are shown.
 
 ## Recommended Headers
@@ -69,6 +72,7 @@ Expected success shape:
 - HTTP `200`
 - `best_fit` or `shortlist` present
 - each recommendation should contain `short_deeplink` when shortener is healthy
+- user-facing output must contain no raw `deeplink`
 - `disclosure` present
 
 ## CLI Example

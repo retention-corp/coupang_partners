@@ -6,7 +6,15 @@ import unittest
 from urllib import error, request
 
 from analytics import AnalyticsStore
-from backend import _Handler, ShoppingBackend, _extract_products, build_server, serve_in_thread
+from backend import (
+    _Handler,
+    ShoppingBackend,
+    _classify_shortlink_request,
+    _extract_products,
+    build_server,
+    serve_in_thread,
+)
+from builders_shortener.admin_auth import AdminAuthService, JsonAdminStore, PENDING, VIEWER
 from security import RateLimiter
 
 
@@ -752,6 +760,262 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(len(client_id), len("anonymous-") + 16)
 
 
+class AdminShortLinkIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self._saved_env = {
+            "OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES": os.environ.get("OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES"),
+            "BUILDERS_SHORTENER_ADMIN_STATE_PATH": os.environ.get("BUILDERS_SHORTENER_ADMIN_STATE_PATH"),
+            "BUILDERS_SHORTENER_ADMIN_AUDIT_PATH": os.environ.get("BUILDERS_SHORTENER_ADMIN_AUDIT_PATH"),
+            "BUILDERS_SHORTENER_BOOTSTRAP_ADMIN_USERNAME": os.environ.get("BUILDERS_SHORTENER_BOOTSTRAP_ADMIN_USERNAME"),
+            "BUILDERS_SHORTENER_BOOTSTRAP_ADMIN_PASSWORD": os.environ.get("BUILDERS_SHORTENER_BOOTSTRAP_ADMIN_PASSWORD"),
+        }
+        for key in self._saved_env:
+            os.environ.pop(key, None)
+        os.environ["OPENCLAW_SHOPPING_ENABLE_OPERATOR_ROUTES"] = "true"
+        _Handler.rate_limiter = RateLimiter(window_seconds=60, max_requests=100)
+        _Handler.public_rate_limiter = None
+        _Handler.authenticated_rate_limiter = None
+        _Handler.admin_rate_limiter = None
+        self.admin_auth = AdminAuthService(
+            JsonAdminStore(
+                f"{self.tempdir.name}/admin-state.json",
+                f"{self.tempdir.name}/admin-audit.jsonl",
+            )
+        )
+        owner = self.admin_auth.ensure_bootstrap_owner("owner@example.com", "owner-pass")
+        self.admin_auth.create_user(owner, "viewer@example.com", "viewer-pass", VIEWER)
+        self.admin_auth.create_user(owner, "pending@example.com", "pending-pass", VIEWER, status=PENDING)
+        self.server = build_server(
+            host="127.0.0.1",
+            port=0,
+            adapter=FakeAdapter(),
+            db_path=f"{self.tempdir.name}/analytics.sqlite3",
+            public_base_url="https://go.example.com",
+            admin_auth_service=self.admin_auth,
+        )
+        self.thread = serve_in_thread(self.server)
+        self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.tempdir.cleanup()
+        for key, value in self._saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _json_request(self, path, payload=None, *, method="GET", headers=None):
+        data = None
+        request_headers = dict(headers or {})
+        if payload is not None:
+            data = json.dumps(payload).encode("utf-8")
+            request_headers["Content-Type"] = "application/json"
+        req_obj = request.Request(
+            f"{self.base_url}{path}",
+            data=data,
+            headers=request_headers,
+            method=method,
+        )
+        return request.urlopen(req_obj, timeout=5)
+
+    def _login(self, username="owner@example.com", password="owner-pass"):
+        response = self._json_request(
+            "/admin/api/session",
+            {"username": username, "password": password},
+            method="POST",
+        )
+        payload = json.loads(response.read().decode("utf-8"))
+        cookie = response.headers["Set-Cookie"].split(";", 1)[0]
+        response.close()
+        return payload["token"], cookie
+
+    def test_admin_routes_require_session_before_exposing_data(self):
+        with self.assertRaises(error.HTTPError) as ctx:
+            request.urlopen(f"{self.base_url}/admin/api/short-links", timeout=5)
+        self.assertEqual(ctx.exception.code, 401)
+        ctx.exception.close()
+
+        with self.assertRaises(error.HTTPError) as page_ctx:
+            request.urlopen(f"{self.base_url}/admin", timeout=5)
+        self.assertEqual(page_ctx.exception.code, 401)
+        page_ctx.exception.close()
+
+    def test_not_approved_admin_account_is_denied_before_exposing_data(self):
+        with self.assertRaises(error.HTTPError) as ctx:
+            self._json_request(
+                "/admin/api/session",
+                {"username": "pending@example.com", "password": "pending-pass"},
+                method="POST",
+            )
+        self.assertEqual(ctx.exception.code, 401)
+        ctx.exception.close()
+
+        pending_user = self.admin_auth.store.get_user("pending@example.com")
+        self.assertEqual(pending_user.status, PENDING)
+
+    def test_admin_api_and_ui_create_list_audit_and_preserve_redirect(self):
+        token, cookie = self._login()
+        create_response = self._json_request(
+            "/admin/api/short-links",
+            {
+                "rows": [
+                    {"url": "https://www.coupang.com/vp/products/10", "alias": "deal-010"},
+                    {"url": "https://www.coupang.com/vp/products/11", "alias": "deal-010"},
+                ]
+            },
+            method="POST",
+            headers={"Cookie": cookie},
+        )
+        created = json.loads(create_response.read().decode("utf-8"))
+        create_response.close()
+
+        self.assertFalse(created["ok"])
+        self.assertEqual(created["results"][0]["link"]["short_url"], "https://go.example.com/s/deal-010")
+        self.assertEqual(created["results"][1]["error"], "alias_conflict")
+
+        list_response = self._json_request(
+            "/admin/api/short-links",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        listed = json.loads(list_response.read().decode("utf-8"))
+        list_response.close()
+        self.assertEqual(len(listed["links"]), 1)
+        self.assertEqual(listed["links"][0]["slug"], "deal-010")
+
+        page_response = request.urlopen(
+            request.Request(f"{self.base_url}/admin", headers={"Cookie": cookie}),
+            timeout=5,
+        )
+        page_html = page_response.read().decode("utf-8")
+        page_response.close()
+        self.assertIn("deal-010", page_html)
+        self.assertIn("viewer@example.com", page_html)
+
+        class NoRedirectHandler(request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        opener = request.build_opener(NoRedirectHandler)
+        with self.assertRaises(error.HTTPError) as redirect_ctx:
+            opener.open(f"{self.base_url}/s/deal-010", timeout=5)
+        self.assertEqual(redirect_ctx.exception.code, 302)
+        self.assertEqual(redirect_ctx.exception.headers["Location"], "https://www.coupang.com/vp/products/10")
+        redirect_ctx.exception.close()
+
+        patch_response = self._json_request(
+            "/admin/api/short-links/deal-010",
+            {"active": False},
+            method="PATCH",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        updated = json.loads(patch_response.read().decode("utf-8"))
+        patch_response.close()
+        self.assertFalse(updated["link"]["active"])
+        with self.assertRaises(error.HTTPError) as inactive_ctx:
+            request.urlopen(f"{self.base_url}/s/deal-010", timeout=5)
+        self.assertEqual(inactive_ctx.exception.code, 404)
+        inactive_ctx.exception.close()
+
+        audit_response = self._json_request("/admin/api/audit", headers={"Cookie": cookie})
+        audit = json.loads(audit_response.read().decode("utf-8"))
+        audit_response.close()
+        outcomes = {(event["action"], event["outcome"]) for event in audit["events"]}
+        self.assertIn(("short_link.create", "partial"), outcomes)
+        self.assertIn(("short_link.update", "success"), outcomes)
+
+    def test_member_without_write_permission_is_forbidden_without_state_change(self):
+        token, _ = self._login("viewer@example.com", "viewer-pass")
+        with self.assertRaises(error.HTTPError) as ctx:
+            self._json_request(
+                "/admin/api/short-links",
+                {"url": "https://www.coupang.com/vp/products/10", "alias": "viewer-write"},
+                method="POST",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        self.assertEqual(ctx.exception.code, 403)
+        ctx.exception.close()
+
+        owner_token, _ = self._login()
+        response = self._json_request(
+            "/admin/api/short-links",
+            headers={"Authorization": f"Bearer {owner_token}"},
+        )
+        payload = json.loads(response.read().decode("utf-8"))
+        response.close()
+        self.assertEqual(payload["links"], [])
+
+    def test_admin_audit_events_include_actor_target_outcome_and_timestamp(self):
+        token, _ = self._login()
+
+        create_response = self._json_request(
+            "/admin/api/short-links",
+            {"url": "https://www.coupang.com/vp/products/20", "alias": "audit-020"},
+            method="POST",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        self.assertEqual(create_response.status, 200)
+        create_response.close()
+
+        patch_response = self._json_request(
+            "/admin/api/short-links/audit-020",
+            {"active": False},
+            method="PATCH",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        self.assertEqual(patch_response.status, 200)
+        patch_response.close()
+
+        audit_response = self._json_request("/admin/api/audit", headers={"Authorization": f"Bearer {token}"})
+        audit = json.loads(audit_response.read().decode("utf-8"))
+        audit_response.close()
+
+        events_by_action = {event["action"]: event for event in audit["events"]}
+        create_event = events_by_action["short_link.create"]
+        update_event = events_by_action["short_link.update"]
+        self.assertEqual(create_event["actor"], "owner@example.com")
+        self.assertEqual(create_event["target"], "batch")
+        self.assertEqual(create_event["outcome"], "success")
+        self.assertEqual(create_event["metadata"]["rows"], 1)
+        self.assertRegex(create_event["timestamp"], r"^\d{4}-\d{2}-\d{2}T")
+        self.assertEqual(update_event["actor"], "owner@example.com")
+        self.assertEqual(update_event["target"], "audit-020")
+        self.assertEqual(update_event["outcome"], "success")
+        self.assertFalse(update_event["metadata"]["active"])
+
+    def test_future_utm_analytics_and_domain_fields_are_documentation_only_for_mvp(self):
+        token, _ = self._login()
+
+        create_response = self._json_request(
+            "/admin/api/short-links",
+            {
+                "rows": [
+                    {
+                        "url": "https://www.coupang.com/vp/products/30?itemId=1",
+                        "alias": "future-030",
+                        "utm_source": "campaign-x",
+                        "domain": "https://other.example.com",
+                        "analytics": {"enabled": True},
+                    }
+                ]
+            },
+            method="POST",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        created = json.loads(create_response.read().decode("utf-8"))
+        create_response.close()
+
+        self.assertTrue(created["ok"])
+        link = created["results"][0]["link"]
+        self.assertEqual(link["short_url"], "https://go.example.com/s/future-030")
+        self.assertEqual(link["target_url"], "https://www.coupang.com/vp/products/30?itemId=1")
+        self.assertNotIn("utm_source", link)
+        self.assertNotIn("domain", link)
+        self.assertNotIn("analytics", link)
+
+
 class ResponseCacheTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -871,6 +1135,15 @@ class ShortlinkAttributionHandlerTests(unittest.TestCase):
             ).fetchall()
         return rows
 
+    def _read_classification_events(self):
+        db_path = f"{self.tempdir.name}/analytics.sqlite3"
+        with sqlite3.connect(db_path) as connection:
+            return connection.execute(
+                "SELECT event_type, metadata_json FROM events "
+                "WHERE event_type IN ('human_redirect', 'preview_fetch', 'automation_fetch') "
+                "ORDER BY created_at ASC"
+            ).fetchall()
+
     def _seed_slug(self):
         assist_request = request.Request(
             f"{self.base_url}/v1/public/assist",
@@ -909,6 +1182,12 @@ class ShortlinkAttributionHandlerTests(unittest.TestCase):
         # we just assert it's present and distinct from the XFF client_ip.
         self.assertTrue(proxy_ip)
         self.assertNotEqual(proxy_ip, client_ip)
+        classifications = self._read_classification_events()
+        self.assertEqual(len(classifications), 1)
+        self.assertEqual(classifications[0][0], "automation_fetch")
+        metadata = json.loads(classifications[0][1])
+        self.assertEqual(metadata["agent"], "curl")
+        self.assertTrue(metadata["observation_mode"])
 
     def test_shortlink_redirect_fallback_without_xff(self):
         slug = self._seed_slug()
@@ -1000,6 +1279,43 @@ class ShortlinkAttributionHandlerTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         _, user_agent, _, _ = rows[0]
         self.assertEqual(len(user_agent), 200)
+
+
+class ShortlinkTrafficClassifierTests(unittest.TestCase):
+    def test_known_preview_bots(self):
+        cases = {
+            "Discordbot/2.0": ("preview_fetch", "discord"),
+            "TelegramBot (like TwitterBot)": ("preview_fetch", "telegram"),
+            "Slackbot-LinkExpanding 1.0": ("preview_fetch", "slack"),
+            "KakaoTalk-Scrap/1.0": ("preview_fetch", "kakao"),
+        }
+        for user_agent, expected in cases.items():
+            with self.subTest(user_agent=user_agent):
+                self.assertEqual(_classify_shortlink_request(user_agent), expected)
+
+    def test_known_automation(self):
+        cases = {
+            "curl/8.7.1": ("automation_fetch", "curl"),
+            "python-requests/2.32.0": ("automation_fetch", "python-requests"),
+            "OpenClawAgentClosedLoop/1.0": ("automation_fetch", "openclaw-closed-loop"),
+            "Claude-User (claude-code/2.1.197)": ("automation_fetch", "claude-user"),
+            "RiskScanner/1.0": ("automation_fetch", "risk-scanner"),
+            "Mozilla/5.0 HeadlessChrome/149.0.0.0 Safari/537.36": ("automation_fetch", "headless-chrome"),
+            "gvfs/1.44.1": ("automation_fetch", "gvfs"),
+        }
+        for user_agent, expected in cases.items():
+            with self.subTest(user_agent=user_agent):
+                self.assertEqual(_classify_shortlink_request(user_agent), expected)
+
+    def test_regular_and_in_app_browsers_remain_human(self):
+        cases = (
+            "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/126 Mobile Safari/537.36",
+            "Mozilla/5.0 KAKAOTALK 11.0.0",
+            "",
+        )
+        for user_agent in cases:
+            with self.subTest(user_agent=user_agent):
+                self.assertEqual(_classify_shortlink_request(user_agent), ("human_redirect", None))
 
 
 class ExtractProductsTests(unittest.TestCase):

@@ -1,0 +1,394 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "쿠팡 파트너스 클릭 급증 조사",
+    "description": "쿠팡 대시보드와 a.retn.kr 리다이렉트 로그를 대조한 비정상 트래픽 진단",
+    "generatedAt": "2026-07-13T20:23:58+09:00",
+    "cards": [
+      {
+        "id": "dashboard_clicks_card",
+        "description": "첨부된 쿠팡 파트너스 대시보드의 표시 클릭 수",
+        "dataset": "headline_metrics",
+        "sourceId": "reconciliation_source",
+        "metrics": [
+          { "label": "쿠팡 표시 클릭", "field": "dashboard_clicks", "format": "number" }
+        ]
+      },
+      {
+        "id": "tracked_redirects_card",
+        "description": "같은 조사 구간에 a.retn.kr 단축링크가 기록한 리다이렉트",
+        "dataset": "headline_metrics",
+        "sourceId": "reconciliation_source",
+        "metrics": [
+          { "label": "자사 추적 리다이렉트", "field": "tracked_redirects", "format": "number" },
+          { "label": "대시보드 대비 관측률", "field": "tracked_coverage", "format": "percent" }
+        ]
+      },
+      {
+        "id": "known_automation_card",
+        "description": "명시적인 미리보기 봇·모니터·curl 요청의 최소 확인치",
+        "dataset": "headline_metrics",
+        "sourceId": "reconciliation_source",
+        "metrics": [
+          { "label": "확인된 자동화 요청", "field": "known_automation", "format": "number" },
+          { "label": "추적 리다이렉트 중 비중", "field": "automation_share", "format": "percent" }
+        ]
+      },
+      {
+        "id": "jul2_gap_card",
+        "description": "7월 2일 쿠팡 표시 클릭 중 자사 단축링크에서 확인되지 않은 수",
+        "dataset": "headline_metrics",
+        "sourceId": "reconciliation_source",
+        "metrics": [
+          { "label": "7월 2일 미관측 격차", "field": "jul2_unobserved_gap", "format": "number" },
+          { "label": "7월 2일 표시 클릭 중 비중", "field": "jul2_gap_share", "format": "percent" }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "click_count_comparison",
+        "title": "쿠팡 표시 클릭과 자사 단축링크 관측치",
+        "subtitle": "전체 구간과 7월 2일 모두 쿠팡 집계가 자사 리다이렉트보다 크게 나타납니다.",
+        "headerMarkdown": "서로 다른 집계 시스템의 **원시 건수 비교**입니다. 두 지표가 동일한 이벤트 정의라는 뜻은 아닙니다.",
+        "type": "bar",
+        "dataset": "count_comparison",
+        "sourceId": "reconciliation_source",
+        "valueFormat": "number",
+        "encodings": {
+          "x": { "field": "metric", "type": "nominal", "label": "관측치" },
+          "y": { "field": "count", "type": "quantitative", "label": "건수" },
+          "tooltip": [
+            { "field": "scope", "type": "text", "label": "범위" },
+            { "field": "note", "type": "text", "label": "설명" }
+          ]
+        }
+      }
+    ],
+    "tables": [
+      {
+        "id": "automation_agents_table",
+        "title": "명시적으로 확인된 자동화 요청",
+        "subtitle": "KakaoTalk 앱 WebView 3건은 실제 사용 가능성이 있어 자동화 집계에서 제외했습니다.",
+        "dataset": "automation_agents",
+        "sourceId": "cloud_run_logs_source",
+        "defaultSort": { "field": "requests", "direction": "desc" },
+        "density": "dense",
+        "columns": [
+          { "field": "agent", "label": "식별된 에이전트", "type": "text" },
+          { "field": "requests", "label": "요청 수", "format": "number" },
+          { "field": "classification", "label": "분류", "type": "text" }
+        ]
+      },
+      {
+        "id": "evidence_table",
+        "title": "핵심 증거와 해석",
+        "subtitle": "확인된 사실과 아직 닫히지 않은 원인을 구분했습니다.",
+        "dataset": "evidence",
+        "sourceId": "reconciliation_source",
+        "defaultSort": { "field": "order", "direction": "asc" },
+        "density": "spacious",
+        "columns": [
+          { "field": "order", "label": "순서", "format": "number" },
+          { "field": "evidence", "label": "증거", "type": "text" },
+          { "field": "interpretation", "label": "해석", "type": "text" },
+          { "field": "confidence", "label": "확신도", "type": "text" }
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "id": "reconciliation_source",
+        "label": "쿠팡 대시보드와 Cloud Run 로그 대조",
+        "query": {
+          "engine": "manual reconciliation",
+          "sql": "SELECT 2972 AS dashboard_clicks, 365 AS tracked_redirects, 365.0 / 2972 AS tracked_coverage, 163 AS known_automation, 163.0 / 365 AS automation_share, 695 - 11 AS jul2_unobserved_gap, (695.0 - 11) / 695 AS jul2_gap_share",
+          "query": "Compare the dashboard screenshot totals with filtered Cloud Run shortlink_redirect events for the same visible period; classify explicit bot and automation user agents separately.",
+          "description": "첨부 대시보드의 클릭 수와 운영 중인 a.retn.kr 리다이렉트 로그를 대조했습니다.",
+          "executed_at": "2026-07-13T08:15:00+09:00",
+          "language": "text",
+          "filters": [
+            "KST 2026-06-12 through 2026-07-13 for Cloud Run logs",
+            "event_name = shortlink_redirect",
+            "explicit bot, preview, monitor, curl, and closed-loop agents counted as known automation",
+            "KakaoTalk app WebView excluded from automation count"
+          ],
+          "metric_definitions": [
+            "tracked coverage = 365 shortlink redirects / 2,972 dashboard clicks",
+            "known automation share = 163 explicit automation requests / 365 shortlink redirects",
+            "July 2 unobserved gap = 695 dashboard clicks - 11 shortlink redirects"
+          ]
+        }
+      },
+      {
+        "id": "cloud_run_logs_source",
+        "label": "a-retn-shortener Cloud Run 구조화 로그",
+        "query": {
+          "engine": "Google Cloud Logging",
+          "sql": "SELECT * FROM (VALUES ('Discordbot', 86, 'link preview'), ('TelegramBot', 41, 'link preview'), ('curl/8.7.1', 21, 'script or check'), ('Kakao scraper', 7, 'link preview'), ('Slackbot', 4, 'link preview'), ('curl/8.18.0', 2, 'script or check'), ('OpenClawAgentClosedLoop', 2, 'operations automation')) AS t(agent, requests, classification) ORDER BY requests DESC",
+          "query": "resource.type=cloud_run_revision AND resource.labels.service_name=a-retn-shortener AND jsonPayload.event_name=shortlink_redirect",
+          "description": "운영 리비전의 리다이렉트 이벤트에서 user agent, 시각, slug, IP를 확인했습니다.",
+          "executed_at": "2026-07-13T08:15:00+09:00",
+          "language": "logging-query",
+          "filters": [
+            "revision a-retn-shortener-00050-wbc",
+            "KST 2026-06-12 through 2026-07-13"
+          ]
+        }
+      },
+      {
+        "id": "repository_source",
+        "label": "단축링크·MCP 응답 코드 검토",
+        "query": {
+          "engine": "repository inspection",
+          "query": "Inspect redirect event recording and response link selection in the current repository.",
+          "description": "리다이렉트가 user agent 필터 전에 기록되는지, 응답에 원본 쿠팡 링크와 short_deeplink가 함께 남는지 확인했습니다.",
+          "executed_at": "2026-07-13T08:10:00+09:00",
+          "language": "text"
+        }
+      },
+      {
+        "id": "cost_impact_source",
+        "label": "비용·가용성 영향 대조",
+        "query": {
+          "engine": "Google Cloud Logging and service configuration",
+          "sql": "SELECT 320 AS jul2_requests, 11 AS jul2_redirects, 0 AS jul2_server_errors, 709.981 AS jul2_latency_seconds, 23352 AS period_requests, 365 AS period_redirects, 17 AS period_server_errors, 39150.648 AS period_latency_seconds",
+          "query": "Aggregate Cloud Run request count, response bytes, summed request latency, status codes, and redirect events for a-retn-shortener; inspect the redirect code path and service billing configuration.",
+          "description": "7월 2일과 전체 조사 구간의 요청량·오류·처리시간을 집계하고, 리다이렉트 1건당 Firestore 작업과 현재 Cloud Run 사양을 대조했습니다.",
+          "executed_at": "2026-07-13T19:45:00+09:00",
+          "language": "logging-query",
+          "filters": [
+            "Cloud Run service a-retn-shortener in us-central1",
+            "KST 2026-06-12 through 2026-07-13",
+            "July 2 daily slice uses KST 2026-07-02",
+            "request latency is summed conservatively and may double-count concurrent execution"
+          ],
+          "metric_definitions": [
+            "July 2 pre-free-tier upper bound uses 1 vCPU, 0.5 GiB memory, 709.981 summed latency seconds, and 320 requests",
+            "one successful redirect performs approximately 1 Firestore read and 3 writes",
+            "period pre-free-tier upper bound applies public us-central1 request-based Cloud Run rates before shared billing-account free tier"
+          ]
+        }
+      },
+      {
+        "id": "pricing_source",
+        "label": "Google Cloud 공식 가격표",
+        "query": {
+          "engine": "official documentation",
+          "query": "Cloud Run request-based pricing and free tier; Firestore daily free quota; Google Cloud Logging free ingestion allowance.",
+          "description": "Cloud Run, Firestore, Logging의 공식 무료 구간과 단가를 비용 상한 계산에 사용했습니다.",
+          "executed_at": "2026-07-13T19:55:00+09:00",
+          "language": "text",
+          "urls": [
+            "https://cloud.google.com/run/pricing",
+            "https://cloud.google.com/firestore/pricing",
+            "https://cloud.google.com/products/observability?hl=en"
+          ]
+        }
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "body": "# 쿠팡 파트너스 클릭 급증 조사"
+      },
+      {
+        "id": "executive_summary",
+        "type": "markdown",
+        "body": "## 결론\n\n**급증 클릭을 실제 사용자 트래픽으로 보면 안 됩니다.** 자사 단축링크 로그에서 미리보기 봇과 자동화 호출이 확실히 확인됐고, 특히 7월 2일 쿠팡 클릭 695건 중 자사 단축링크를 지난 요청은 11건뿐이었습니다. 그 11건 중 9건은 Discord 미리보기 봇, 나머지 2건만 일반 Android Chrome 형태였습니다.\n\n**이 급증으로 큰 비용이 발생했거나 서비스가 흔들린 정황은 없습니다.** 7월 2일 전체 요청은 320건, 5xx 오류는 0건이었고, 보수적으로 계산한 Cloud Run 원가도 무료 구간 적용 전 약 $0.02 미만입니다. 전체 조사 구간의 모든 요청을 합쳐도 무료 구간 적용 전 보수적 상한은 약 $1입니다.\n\n다만 쿠팡 대시보드의 나머지 클릭을 발생시킨 정확한 채널은 쿠팡 원시 클릭 로그 없이 단정할 수 없습니다. 현재 증거는 `실사용 급증`을 부정하기에는 충분하지만, 미관측 2,607건의 단일 원인을 확정하기에는 부족합니다."
+      },
+      {
+        "id": "headline_metrics_block",
+        "type": "metric-strip",
+        "cardIds": [
+          "dashboard_clicks_card",
+          "tracked_redirects_card",
+          "known_automation_card",
+          "jul2_gap_card"
+        ]
+      },
+      {
+        "id": "comparison_heading",
+        "type": "markdown",
+        "body": "## 핵심 대조\n\n대시보드 클릭과 자사 관측치를 같은 축에 놓으면 이상 징후가 선명합니다."
+      },
+      { "id": "comparison_chart_block", "type": "chart", "chartId": "click_count_comparison" },
+      {
+        "id": "bot_heading",
+        "type": "markdown",
+        "body": "## 확인된 비사용자 트래픽\n\n단축링크는 미리보기 봇을 차단하거나 별도 분류하기 전에 쿠팡으로 리다이렉트하고 있었습니다. Discord와 Telegram 미리보기 봇이 먼저 링크를 열고 수초 뒤 실제 브라우저가 같은 링크를 여는 패턴도 반복 확인됐습니다. 따라서 현재의 쿠팡 `클릭`에는 사람이 상품을 보려는 행동 외의 요청이 섞일 수 있습니다."
+      },
+      { "id": "automation_table_block", "type": "table", "tableId": "automation_agents_table" },
+      {
+        "id": "cause_heading",
+        "type": "markdown",
+        "body": "## 원인 판정\n\n초기에는 7월 2일 자동 추천 API 호출 270건이 최대 3개 상품 링크를 만들 수 있어 695건 급증과 숫자상 비슷해 보였습니다. 하지만 날짜별 교차검증에서 API 호출량과 쿠팡 클릭이 비례하지 않았으므로 **직접 원인으로 채택하지 않았습니다.**\n\n현재 가장 타당한 설명은 두 가지가 함께 존재한다는 것입니다. 첫째, Discord·Telegram·Slack 등의 링크 미리보기와 모니터링 요청이 실제 쿠팡 리다이렉트까지 도달합니다. 둘째, 응답에 원본 쿠팡 링크가 함께 노출되어 자사 단축링크를 우회한 클릭이나 자동화 요청은 우리 로그에서 보이지 않습니다."
+      },
+      {
+        "id": "evidence_summary",
+        "type": "markdown",
+        "body": "### 증거별 확신도\n\n- **높음** — 7월 2일 쿠팡 클릭 695건 중 자사 리다이렉트는 11건뿐이며, 최소 684건은 현재 단축링크 경로 밖에서 발생했습니다.\n- **높음** — 그날 자사 관측 11건 중 9건이 Discordbot이어서, 관측 트래픽도 대부분 사람 행동이 아니었습니다.\n- **높음** — 전체 자사 리다이렉트 365건 중 명시적 자동화가 163건으로, 추적 가능한 요청의 최소 44.7%입니다.\n- **높음** — 미리보기 봇 호출 뒤 수초 후 일반 브라우저가 같은 링크를 호출해, 한 번의 공유가 봇 선행 클릭과 사람 클릭을 함께 만드는 패턴이 확인됐습니다.\n- **중간** — 응답에 원본 `deeplink`와 `short_deeplink`가 함께 있어 원본 링크 사용 시 자사 로그를 우회할 수 있습니다.\n- **높음** — 자동 추천 API 호출과 일별 쿠팡 클릭이 비례하지 않아, API 호출 수만으로 급증을 설명하는 가설은 기각했습니다."
+      },
+      {
+        "id": "cost_impact",
+        "type": "markdown",
+        "body": "## 비용·2차 영향 점검\n\n**큰 비용 사고 징후는 없습니다.** 7월 2일 Cloud Run 전체 요청은 320건, 성공 리다이렉트는 11건, 5xx는 0건이었습니다. 보수적으로 모든 요청 처리시간을 직렬 합산해도 그날 Cloud Run 원가는 무료 구간 적용 전 약 **$0.02 미만**입니다.\n\n- **Cloud Run 비용 · 영향 거의 없음** — 7월 2일 무료 구간 전 상한 약 $0.02, 6/12~7/13 전체 서비스 요청도 약 $1 상한입니다. 실제 청구는 공유 무료 구간 적용 시 0에 가까울 가능성이 높습니다.\n- **Firestore 비용 · 영향 없음 수준** — 7월 2일 리다이렉트 11건은 약 11 reads + 33 writes입니다. 전체 365건도 약 365 reads + 1,095 writes로 일일 무료 쿼터보다 매우 작습니다.\n- **네트워크·로그 · 영향 없음 수준** — 전체 응답 데이터 약 146 MiB, 요청 23,352건으로 공식 무료 구간보다 현저히 작습니다.\n- **서비스 가용성 · 급증 관련 장애 없음** — 7월 2일 5xx 0건, 7월 1~13일 5xx 0건입니다. 429 41건은 별도 검색 API에 6/30~7/1 집중되어 클릭 급증과 시점·경로가 다릅니다.\n- **매출·정산 · 손실 증거 없음** — 화면상 18건 구매·₩21,015 수익이 보이며 차감·보류·계정 제한 표시는 없습니다. 다만 쿠팡 원시 로그와 통지 내역 없이는 무효 클릭 판정 여부를 확정할 수 없습니다.\n- **분석 지표 · 확정 영향** — 비사용자·미관측 클릭이 분모를 부풀려 전환율 0.61%를 실제 사용자 전환율로 해석할 수 없습니다.\n- **보안 · 침해 증거 없음** — 일반 인터넷 스캐너 요청은 404로 종료됐습니다. 현재 로그에 침해 흔적은 없지만 로그만으로 부재를 증명할 수는 없습니다.\n\n별도 관찰점으로, 조사 구간의 추천·보조 API 호출은 16,870건으로 단축링크 리다이렉트 365건보다 훨씬 많았습니다. 이 활동이 이번 클릭 급증과 비례하지는 않았지만, 향후 비용·쿼터 감시는 클릭 수보다 이 호출량을 중심으로 하는 편이 맞습니다."
+      },
+      {
+        "id": "link_architecture_and_revenue_impact",
+        "type": "markdown",
+        "body": "## 링크 미리보기 봇 분리와 원본 링크 노출 제거\n\n### 무엇을 바꾸는 작업인가\n\n현재 추천 응답에는 원본 쿠팡 제휴 URL인 `deeplink`와 자사 단축 URL인 `short_deeplink`가 함께 들어갑니다. 클라이언트는 대체로 단축 URL을 우선 사용하지만, 원본 URL을 직접 선택하거나 단축링크 생성에 실패하면 원본으로 되돌아갈 수 있습니다. `/s/<slug>`에 들어온 요청은 요청 주체를 판별하기 전에 클릭 수와 `book_click`, `shortlink_redirect`를 기록하고 곧바로 쿠팡 원본 URL로 302 이동시킵니다. 따라서 Discord·Telegram·Slack·Kakao 미리보기 수집기도 사람과 똑같은 쿠팡 클릭 경로를 밟습니다.\n\n**원본 링크 노출 제거**는 원본 쿠팡 URL을 삭제하는 일이 아닙니다. 서버의 Firestore에는 `target_url`로 계속 보관해 실제 사람을 쿠팡으로 보내되, API·OpenClaw·게시물 등 외부 표면에는 `a.retn.kr/s/<slug>`만 클릭 가능한 정식 링크로 내보내는 변경입니다. OpenAPI 응답 계약, MCP 매핑, 책 콘텐츠 생성기, OpenClaw 사용 지침과 테스트가 함께 바뀌어야 합니다. 이미 발행된 원본 링크는 회수할 수 없으므로 신규 발행분부터 적용됩니다.\n\n**미리보기 봇 분리**는 `/s/<slug>` 요청을 최소 세 종류로 나눕니다. 알려진 미리보기 수집기는 `preview_fetch`, 실제 브라우저는 `human_redirect`, curl·모니터는 `automation_fetch`로 기록합니다. 측정 단계에서는 모두 현재처럼 302를 유지하고 분류만 합니다. 효과 검증 뒤 알려진 미리보기 봇에만 쿠팡으로 이동하지 않는 200 응답과 OG 제목·이미지를 제공하고, 실제 브라우저에는 기존 302를 유지합니다. 봇도 GET을 사용하므로 HEAD 요청만 제외해서는 해결되지 않으며, 일반 모바일 브라우저나 KakaoTalk 앱 WebView는 사람일 수 있어 차단하면 안 됩니다.\n\n### 돈이 덜 벌릴 수 있는 지점\n\n- **오탐 차단** — 사람 브라우저를 봇으로 잘못 분류하면 쿠팡에 도달하지 못합니다. 가장 직접적인 매출 손실입니다.\n- **미리보기 품질 저하** — 카드 이미지·제목이 사라지거나 링크가 의심스럽게 보이면 공유 후 사람 클릭률이 내려갈 수 있습니다.\n- **응답 계약 파손** — 원본 `deeplink`를 즉시 제거하면 아직 그 필드를 읽는 클라이언트가 링크를 표시하지 못할 수 있습니다. 단계적 폐기와 소비자 목록 확인이 필요합니다.\n- **단축기 장애** — 원본 링크를 외부에서 없앤 뒤 단축링크 생성·해석이 실패하면 모든 클릭 경로가 막힙니다. 단축 실패 시 원본을 내보내는 `fail-open`은 매출을 보존하지만 측정을 다시 우회하고, 링크를 내보내지 않는 `fail-closed`는 데이터는 깨끗하지만 장애 시간만큼 매출을 잃습니다. 초기에는 원본 fallback 발생을 별도 기록·경보하는 단계적 정책이 안전합니다.\n- **추가 지연** — 사람 요청에 분류·조회 시간이 늘면 이탈 가능성이 있습니다. 리다이렉트 성공률과 p95 지연을 보호 지표로 둬야 합니다.\n- **반대 방향의 효과** — 원본 우회를 줄이면 사람 클릭의 관측률, 장애 탐지, 채널별 성과 판별이 좋아집니다. 목적 URL과 파트너 태그가 동일하게 유지되는 한 단축링크 자체가 커미션을 낮추는 구조는 아닙니다.\n\n### 현재 숫자로 볼 수 있는 범위\n\n화면 기준 구매당 평균 수익은 **₩1,168**, 구매당 거래액은 **₩38,907**, 실효 수익률은 약 **3.00%**입니다. 따라서 변경 때문에 실제 구매 1건을 잃으면 현재 상품 구성 기준 약 ₩1,168, 10건이면 약 ₩11,675의 수익 손실로 환산할 수 있습니다.\n\n명시적 미리보기 봇은 전체 자사 리다이렉트 365건 중 138건입니다. 이 138건이 모두 쿠팡 클릭에 1대1로 포함됐다고 가정하고 사람·구매에는 아무 영향 없이 제외하면, 화면 전환율은 18 ÷ 2,972 = **0.606%**에서 18 ÷ 2,834 = **0.635%**로 약 **4.9% 상대 개선**되지만 수익 ₩21,015는 그대로입니다. 이는 봇 제거가 매출 개선이 아니라 먼저 측정 정확도 개선이라는 뜻입니다. 다만 쿠팡의 중복 제거 규칙을 모르므로 138건 전부가 대시보드 클릭이라는 가정은 검증되지 않았습니다.\n\n화면의 클릭당 수익은 ₩21,015 ÷ 2,972 = **₩7.07**이지만, 분모에 봇과 자사 미관측 클릭이 섞였으므로 예상 손실 계산에 그대로 쓰면 안 됩니다. 또한 구매 18건을 개별 slug나 사람형 클릭에 연결할 수 없어 현재 자료만으로 `봇 분리 시 수익이 몇 원 변한다`는 인과 계산은 불가능합니다.\n\n### 실제 매출 영향을 계산하는 식\n\n- **오탐 손실** = 봇으로 잘못 막힌 사람 수 × 사람 구매전환율 × 구매당 평균 수익\n- **미리보기 변화 손실** = 공유 링크 수 × (기존 사람 클릭률 − 변경 후 사람 클릭률) × 사람 구매전환율 × 구매당 평균 수익\n- **단축기 장애 손실** = 장애 중 링크 노출 수 × 평시 사람 클릭률 × 사람 구매전환율 × 구매당 평균 수익\n- **원본 링크 통일 효과** = 신규 발행 링크 수 × 사람 클릭률 × 구매전환율 × 구매당 평균 수익 × (변경 후 정상 귀속률 − 기존 정상 귀속률)\n\n가장 중요한 1차 KPI는 쿠팡의 `클릭 수`가 아니라 **발행 링크 1개당 수익** 또는 **공유 1회당 수익**입니다. 진단 지표는 사람형 리다이렉트율과 구매전환율, 보호 지표는 미리보기 성공률·302 성공률·p95 지연·원본 fallback률입니다. 이를 계산하려면 `link_issued`, `preview_fetch`, `human_redirect`, `automation_fetch`, `raw_fallback`, `redirect_error`를 같은 slug에 기록하고, 쿠팡 구매·수익 자료를 subId나 별도 귀속키로 연결해야 합니다.\n\n### 안전한 적용 순서\n\n1. **7일 관찰 모드** — 동작은 바꾸지 않고 user agent 분류와 위 이벤트만 기록합니다. 플랫폼별 봇 규모와 오탐 후보를 확보합니다.\n2. **원본 링크 단계적 폐기** — 소비자를 목록화한 뒤 `short_deeplink`를 정식 링크로 고정하고 원본 필드는 deprecated 처리합니다. fallback 발생률과 링크 렌더링 실패를 먼저 감시합니다.\n3. **플랫폼별 소규모 실험** — Discordbot처럼 확실한 수집기부터 일부 slug만 미리보기 200 응답으로 전환합니다. 통제군은 기존 302를 유지합니다.\n4. **수익 기준 판정** — 발행 링크당 수익과 사람 클릭률이 통제군보다 나빠지지 않고, 미리보기 성공률과 302 성공률이 유지될 때만 Telegram·Slack·Kakao scraper로 확대합니다. 미리보기 깨짐, 사람 클릭 급감, 원본 fallback 증가가 보이면 즉시 되돌립니다.\n\n이 계산 영역은 변수 사이의 손익 관계와 단계적 실험 설계가 핵심이어서 별도 차트보다 공식과 기준을 직접 제시했습니다."
+      },
+      {
+        "id": "recommendations",
+        "type": "markdown",
+        "body": "## 권고 조치\n\n1. 쿠팡 대시보드 클릭을 `사람 클릭 KPI`로 사용하지 말고, 봇을 분리한 자사 단축링크 이벤트를 운영 KPI로 삼습니다.\n2. 외부에 노출되는 모든 제휴 링크를 `/s/<slug>`로 통일하고 원본 쿠팡 링크의 직접 노출을 제거합니다.\n3. 미리보기·모니터 user agent는 쿠팡으로 리다이렉트하지 않고 `preview_fetch` 같은 별도 이벤트로 기록합니다.\n4. `쿠팡 표시 클릭 ÷ 사람형 단축링크 클릭` 격차를 일별로 감시해 임계치 초과 시 알립니다.\n5. 쿠팡에서 채널·referrer·device·subId 단위 상세 클릭 자료를 받아 미관측 2,607건의 출처를 확정합니다."
+      },
+      {
+        "id": "questions",
+        "type": "markdown",
+        "body": "## 추가로 확인할 질문\n\n- 급증일의 클릭이 특정 채널 ID 또는 subId에 몰렸는가?\n- 동일 파트너 ID가 다른 서비스·봇·테스트 환경에서도 사용 중인가?\n- 쿠팡이 링크 미리보기 HEAD/GET 요청과 반복 요청을 각각 클릭으로 집계하는가?\n- 7월 2일과 후속 급증일의 referrer·device·국가·IP 분포가 유사한가?"
+      },
+      {
+        "id": "caveats",
+        "type": "markdown",
+        "body": "## 한계와 가정\n\n- 첨부 화면의 표시 구간은 축상 6월 12일부터 7월 12일 전후로 보이며, Cloud Run 조회는 7월 13일까지 포함했습니다. 하루 경계 차이가 전체 결론을 바꾸지는 않지만 정확한 일대일 정산에는 쿠팡 내보내기가 필요합니다.\n- 쿠팡 `클릭`과 자사 `shortlink_redirect`는 정의·중복 제거 방식이 다를 수 있습니다. 따라서 2,607건은 `확정 봇 수`가 아니라 `자사 로그에서 관측되지 않은 격차`입니다.\n- 명시적인 bot·preview·curl·monitor만 자동화로 분류했으므로 163건은 보수적인 최소치입니다. 일반 브라우저 user agent를 흉내 낸 자동화는 포함되지 않습니다.\n- 이 프로젝트에는 비용 내보내기 데이터가 없고 Cloud Run 무료 구간은 결제 계정 내 여러 프로젝트가 공유할 수 있습니다. 따라서 `실제 청구 0원`은 단정하지 않고, 해당 서비스의 공개 단가 기준 무료 구간 전 보수적 상한을 함께 제시했습니다. 정확한 원화 청구액은 결제 계정의 월별 비용 보고서에서 확인해야 합니다.\n- 처리시간 합계는 동시 실행 요청을 각각 더한 값이라 실제 인스턴스 과금시간보다 클 수 있습니다. 비용 계산은 의도적으로 보수적인 상한입니다.\n- 쿠팡의 무효 클릭 처리나 계정 조치는 대시보드 화면만으로 확정할 수 없습니다. 별도 경고·정산 조정·원시 클릭 자료가 필요합니다.\n- 이 보고서는 진단 결과이며 운영 코드나 배포 상태는 변경하지 않았습니다."
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-07-13T20:23:58+09:00",
+    "status": "ready",
+    "datasets": {
+      "headline_metrics": [
+        {
+          "dashboard_clicks": 2972,
+          "tracked_redirects": 365,
+          "tracked_coverage": 0.1228,
+          "known_automation": 163,
+          "automation_share": 0.4466,
+          "jul2_unobserved_gap": 684,
+          "jul2_gap_share": 0.9842
+        }
+      ],
+      "count_comparison": [
+        { "metric": "전체 · 쿠팡 표시", "scope": "전체 표시 구간", "count": 2972, "note": "첨부 대시보드" },
+        { "metric": "전체 · 자사 추적", "scope": "6/12~7/13 KST", "count": 365, "note": "shortlink_redirect" },
+        { "metric": "7/2 · 쿠팡 표시", "scope": "2026-07-02", "count": 695, "note": "첨부 대시보드 툴팁" },
+        { "metric": "7/2 · 자사 추적", "scope": "2026-07-02 KST", "count": 11, "note": "9 Discordbot + 2 Android Chrome" }
+      ],
+      "automation_agents": [
+        { "agent": "Discordbot", "requests": 86, "classification": "링크 미리보기" },
+        { "agent": "TelegramBot", "requests": 41, "classification": "링크 미리보기" },
+        { "agent": "curl/8.7.1", "requests": 21, "classification": "스크립트·점검" },
+        { "agent": "Kakao scraper", "requests": 7, "classification": "링크 미리보기" },
+        { "agent": "Slackbot", "requests": 4, "classification": "링크 미리보기" },
+        { "agent": "curl/8.18.0", "requests": 2, "classification": "스크립트·점검" },
+        { "agent": "OpenClawAgentClosedLoop", "requests": 2, "classification": "운영 자동화" }
+      ],
+      "evidence": [
+        { "order": 1, "evidence": "7월 2일: 쿠팡 695건, 자사 리다이렉트 11건", "interpretation": "최소 684건은 현재 단축링크 경로 밖에서 발생", "confidence": "높음" },
+        { "order": 2, "evidence": "7월 2일 자사 11건 중 Discordbot 9건", "interpretation": "해당 날짜의 자사 관측 트래픽도 대부분 사람 행동이 아님", "confidence": "높음" },
+        { "order": 3, "evidence": "전체 자사 365건 중 명시적 자동화 163건", "interpretation": "추적 가능한 요청의 최소 44.7%가 자동화", "confidence": "높음" },
+        { "order": 4, "evidence": "미리보기 봇 호출 뒤 수초 후 일반 브라우저가 동일 링크 호출", "interpretation": "한 번의 공유가 봇 선행 클릭과 사람 클릭을 함께 만들 수 있음", "confidence": "높음" },
+        { "order": 5, "evidence": "응답에 원본 deeplink와 short_deeplink가 함께 존재", "interpretation": "원본 링크 사용 시 자사 로그를 우회할 수 있음", "confidence": "중간" },
+        { "order": 6, "evidence": "자동 추천 API 호출과 일별 쿠팡 클릭이 비례하지 않음", "interpretation": "API 호출 수만으로 급증 원인을 설명할 수 없음", "confidence": "높음" }
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "reconciliation_source",
+      "label": "쿠팡 대시보드와 Cloud Run 로그 대조",
+      "query": {
+        "engine": "manual reconciliation",
+        "sql": "SELECT 2972 AS dashboard_clicks, 365 AS tracked_redirects, 365.0 / 2972 AS tracked_coverage, 163 AS known_automation, 163.0 / 365 AS automation_share, 695 - 11 AS jul2_unobserved_gap, (695.0 - 11) / 695 AS jul2_gap_share",
+        "query": "Compare the dashboard screenshot totals with filtered Cloud Run shortlink_redirect events for the same visible period; classify explicit bot and automation user agents separately.",
+        "description": "첨부 대시보드의 클릭 수와 운영 중인 a.retn.kr 리다이렉트 로그를 대조했습니다.",
+        "executed_at": "2026-07-13T08:15:00+09:00",
+        "language": "text",
+        "filters": [
+          "KST 2026-06-12 through 2026-07-13 for Cloud Run logs",
+          "event_name = shortlink_redirect",
+          "explicit bot, preview, monitor, curl, and closed-loop agents counted as known automation",
+          "KakaoTalk app WebView excluded from automation count"
+        ],
+        "metric_definitions": [
+          "tracked coverage = 365 shortlink redirects / 2,972 dashboard clicks",
+          "known automation share = 163 explicit automation requests / 365 shortlink redirects",
+          "July 2 unobserved gap = 695 dashboard clicks - 11 shortlink redirects"
+        ]
+      }
+    },
+    {
+      "id": "cloud_run_logs_source",
+      "label": "a-retn-shortener Cloud Run 구조화 로그",
+      "query": {
+        "engine": "Google Cloud Logging",
+        "sql": "SELECT * FROM (VALUES ('Discordbot', 86, 'link preview'), ('TelegramBot', 41, 'link preview'), ('curl/8.7.1', 21, 'script or check'), ('Kakao scraper', 7, 'link preview'), ('Slackbot', 4, 'link preview'), ('curl/8.18.0', 2, 'script or check'), ('OpenClawAgentClosedLoop', 2, 'operations automation')) AS t(agent, requests, classification) ORDER BY requests DESC",
+        "query": "resource.type=cloud_run_revision AND resource.labels.service_name=a-retn-shortener AND jsonPayload.event_name=shortlink_redirect",
+        "description": "운영 리비전의 리다이렉트 이벤트에서 user agent, 시각, slug, IP를 확인했습니다.",
+        "executed_at": "2026-07-13T08:15:00+09:00",
+        "language": "logging-query",
+        "filters": [
+          "revision a-retn-shortener-00050-wbc",
+          "KST 2026-06-12 through 2026-07-13"
+        ]
+      }
+    },
+    {
+      "id": "repository_source",
+      "label": "단축링크·MCP 응답 코드 검토",
+      "query": {
+        "engine": "repository inspection",
+        "query": "Inspect redirect event recording and response link selection in the current repository.",
+        "description": "리다이렉트가 user agent 필터 전에 기록되는지, 응답에 원본 쿠팡 링크와 short_deeplink가 함께 남는지 확인했습니다.",
+        "executed_at": "2026-07-13T08:10:00+09:00",
+        "language": "text"
+      }
+    },
+    {
+      "id": "cost_impact_source",
+      "label": "비용·가용성 영향 대조",
+      "query": {
+        "engine": "Google Cloud Logging and service configuration",
+        "sql": "SELECT 320 AS jul2_requests, 11 AS jul2_redirects, 0 AS jul2_server_errors, 709.981 AS jul2_latency_seconds, 23352 AS period_requests, 365 AS period_redirects, 17 AS period_server_errors, 39150.648 AS period_latency_seconds",
+        "query": "Aggregate Cloud Run request count, response bytes, summed request latency, status codes, and redirect events for a-retn-shortener; inspect the redirect code path and service billing configuration.",
+        "description": "7월 2일과 전체 조사 구간의 요청량·오류·처리시간을 집계하고, 리다이렉트 1건당 Firestore 작업과 현재 Cloud Run 사양을 대조했습니다.",
+        "executed_at": "2026-07-13T19:45:00+09:00",
+        "language": "logging-query",
+        "filters": [
+          "Cloud Run service a-retn-shortener in us-central1",
+          "KST 2026-06-12 through 2026-07-13",
+          "July 2 daily slice uses KST 2026-07-02",
+          "request latency is summed conservatively and may double-count concurrent execution"
+        ],
+        "metric_definitions": [
+          "July 2 pre-free-tier upper bound uses 1 vCPU, 0.5 GiB memory, 709.981 summed latency seconds, and 320 requests",
+          "one successful redirect performs approximately 1 Firestore read and 3 writes",
+          "period pre-free-tier upper bound applies public us-central1 request-based Cloud Run rates before shared billing-account free tier"
+        ]
+      }
+    },
+    {
+      "id": "pricing_source",
+      "label": "Google Cloud 공식 가격표",
+      "query": {
+        "engine": "official documentation",
+        "query": "Cloud Run request-based pricing and free tier; Firestore daily free quota; Google Cloud Logging free ingestion allowance.",
+        "description": "Cloud Run, Firestore, Logging의 공식 무료 구간과 단가를 비용 상한 계산에 사용했습니다.",
+        "executed_at": "2026-07-13T19:55:00+09:00",
+        "language": "text",
+        "urls": [
+          "https://cloud.google.com/run/pricing",
+          "https://cloud.google.com/firestore/pricing",
+          "https://cloud.google.com/products/observability?hl=en"
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+[
+  {
+    "task_id": "T2",
+    "severity": "blocking",
+    "summary": "Worker charter and plan omit normalized Given/When/Then for R-F2 and R-F3.",
+    "detail": "The canonical worker contract requires verbatim given/when/then for every fulfilled sub-requirement and says to abort instead of deriving behavior from action text. T2 therefore could not verify the delegated GWT scenarios or safely mark implementation complete.",
+    "observed_at": "2026-09-03T19:16:00+09:00"
+  }
+]

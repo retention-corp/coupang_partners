@@ -1,0 +1,53 @@
+{
+  "assumptions": [
+    "Assume the primary actor is the user or automation agent described by the goal; do not introduce additional actor classes.",
+    "Use only inputs already present in the goal, repository state, or explicit interview answers; do not require new external data.",
+    "Produce the smallest observable artifact, state change, or response needed to satisfy the goal and make verification possible.",
+    "Do not perform credential handling, billing, production deployment, legal or medical judgment, security-sensitive authority choices, or ambiguous external side effects.",
+    "Use the current repository/worktree runtime and established project conventions; do not choose a new framework, provider, or deployment target."
+  ],
+  "auto_session_id": "auto_3971a60734e5",
+  "blocker": null,
+  "counts": {
+    "ambiguity": 2,
+    "decisions": 28,
+    "flags": 2,
+    "gated": 5,
+    "lateral": 1,
+    "promoted": 28,
+    "questions": 15,
+    "rejected": 0
+  },
+  "degraded": false,
+  "gate_findings": [],
+  "grade": "A",
+  "interview_closure_mode": "safe_default",
+  "interview_session_id": "interview_b2529659180f4fe0",
+  "non_goals": [],
+  "open_gaps": [],
+  "phase": "complete",
+  "provenance_histogram": {
+    "maintainer_policy": 14,
+    "timeout_default": 5,
+    "user_confirmed": 9
+  },
+  "qa": {
+    "differences": [
+      "5 Seed QA feedback item(s) withheld from durable state"
+    ],
+    "passed": false,
+    "score": 0.56,
+    "suggestions": [
+      "5 Seed QA feedback item(s) withheld from durable state"
+    ],
+    "verdict": "revise"
+  },
+  "run_id": "auto_3971a60734e5",
+  "seed_decision_provenance": {},
+  "seed_id": "seed_f2d87095804c",
+  "seed_origin": "auto_pipeline",
+  "seed_path": "/Users/gyusupsim/.ouroboros/seeds/seed_f2d87095804c.yaml",
+  "status": "complete",
+  "stop_reason_code": null,
+  "unverified_provenance_findings": []
+}

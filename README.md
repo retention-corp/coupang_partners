@@ -112,6 +112,15 @@ Protected endpoints require:
 - `POST /internal/v1/deeplinks`
 - `GET /v1/admin/summary`
 
+Semi-private short-link admin MVP:
+
+- Operator docs: [docs/SHORT-LINK-ADMIN-MVP.md](docs/SHORT-LINK-ADMIN-MVP.md)
+- `GET /admin` serves the protected admin UI after an admin session is created.
+- `POST /admin/api/session` creates an HttpOnly admin session cookie.
+- `GET` / `POST /admin/api/short-links` list and create single or batch links.
+- `PATCH /admin/api/short-links/{slug}` activates or deactivates a link.
+- `GET /admin/api/audit` returns recent admin audit events.
+
 Agent integration:
 
 - Agent manifest: [agent_manifest.json](agent_manifest.json)
@@ -160,7 +169,15 @@ If you are testing internal/operator flows against a non-local host, also set
 Local development is intentionally a separate override path. Public docs and install defaults should keep pointing at `https://a.retn.kr`.
 
 When enabled, recommendation and search responses include `short_deeplink`.
+That field is the canonical user-facing link. `deeplink` remains temporarily for
+backwards compatibility, but is deprecated and must not be printed or shared.
 The backend also exposes `GET /s/<slug>` and redirects to the original affiliate URL.
+
+Short-link traffic currently runs in observation mode. Every `/s/<slug>` request
+still receives the same `302`, while analytics records one additional event:
+`human_redirect`, `preview_fetch`, or `automation_fetch`. The classifier version
+and matched agent are also attached to the existing `shortlink_redirect` event.
+This separation is measurement-only and does not suppress affiliate redirects.
 
 Shared Firestore short-link provider for Cloud Run:
 

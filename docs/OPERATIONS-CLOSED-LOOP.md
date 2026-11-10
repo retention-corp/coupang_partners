@@ -57,6 +57,34 @@ These are cumulative guardrails, not billing-grade counters. If a guard trips:
 3. Keep public assist available for known clients if traffic is legitimate.
 4. Verify `short_deeplink` and `/s/<slug>` still work after any mitigation.
 
+## Short-link traffic observation mode
+
+The production-safe first stage separates measurement without changing routing:
+
+- `human_redirect`: normal browser and in-app browser requests
+- `preview_fetch`: dedicated Discord, Telegram, Slack, or Kakao preview crawlers
+- `automation_fetch`: known probes and operational clients such as curl or the
+  closed-loop monitor
+- `shortlink_redirect`: retained as the billing/operations-compatible total
+
+All four paths still receive the same `302` to the affiliate destination. Do not
+block or return `200` to preview bots until at least seven full days of classified
+traffic have been reviewed.
+
+Review the structured production logs by `traffic_class`, `traffic_agent`, and
+`classifier_version`. For each day calculate:
+
+- observed human share = `human_redirect / shortlink_redirect`
+- adjusted human conversion = Coupang purchases / `human_redirect`
+- inflated-click estimate = `shortlink_redirect - human_redirect`
+- cost check = Cloud Run request and egress cost before/after deployment
+
+The raw `deeplink` field is deprecated but remains in API responses during this
+observation window. Before removing it, verify every agent surface uses
+`short_deeplink`, run the deep canary, and compare assist-to-click and click-to-order
+rates against the seven-day baseline. Roll back if human clicks or orders fall more
+than normal day-of-week variance.
+
 ## Failure Map
 
 `cloudflare_blocked`

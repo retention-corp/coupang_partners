@@ -151,3 +151,12 @@ Target:
 5. Closed-loop alert sink and recovery ownership
 6. Recommendation quality improvements
 7. Production docs cleanup
+
+### Short-link traffic quality rollout (active)
+
+- Observation-only classification is implemented for `human_redirect`,
+  `preview_fetch`, and `automation_fetch`; redirects remain unchanged.
+- `deeplink` is deprecated in the public schema and `short_deeplink` is the only
+  supported user-facing link.
+- Pending: collect seven full days, calculate adjusted conversion/cost, then decide
+  whether a limited preview-bot `200` canary and raw-field removal are justified.

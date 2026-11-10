@@ -1,0 +1,2 @@
+{"kind": "terminal_phase", "type": "state_flag", "value": "complete"}
+{"kind": "interview_closure_mode", "type": "state_flag", "value": "safe_default"}

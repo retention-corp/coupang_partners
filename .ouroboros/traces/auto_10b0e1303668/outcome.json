@@ -1,0 +1,55 @@
+{
+  "assumptions": [
+    "CSV 파일과 2열 붙여넣기는 모두 헤더 없이 행마다 `alias,landing_url` 순서로 최대 100행을 받으며, 빈 행은 행 수에서 제외한다. 열 누락·추가 또는 빈 값이 있는 행은 해당 행만 실패 처리하고 나머지 유효 행은 입력 순서대로 처리하며, 예시 입력 `summer,https://example.com\\nbad,\\nwinter,https://example.org`의 결과는 `[{\"row\":1,\"alias\":\"summer\",\"status\":\"created\"},{\"row\":2,\"alias\":\"bad\",\"status\":\"failed\",\"error\":\"invalid_row\"},{\"row\":3,\"alias\":\"winter\",\"status\":\"created\"}]`이다. 유효한 요청에서 행별 실패가 있어도 HTTP 200을 반환하며, 빈 행 제외 후 100행을 초과하면 전체 요청을 처리하지 않고 HTTP 400과 `{\"error\":\"too_many_rows\",\"max_rows\":100}`을 반환한다.",
+    "CSV 파일과 2열 붙여넣기는 모두 헤더 없이 행마다 `alias,landing_url` 순서로 최대 100행을 받으며, 빈 행은 행 수에서 제외한다. 열 누락·추가 또는 빈 값이 있는 행은 해당 행만 실패 처리하고, 입력 순서대로 `{\"row\":1,\"alias\":\"\",\"status\":\"error\",\"error\":\"invalid_row\"}` 형식의 행별 결과를 반환하며 유효한 행은 계속 생성한다. 빈 행 제외 후 101행 이상이면 어떤 행도 생성하지 않고 HTTP 400과 `{\"error\":\"too_many_rows\",\"max_rows\":100}`을 반환한다.",
+    "CSV 파일과 2열 붙여넣기는 모두 헤더 없이 행마다 `alias,landing_url` 순서로 최대 100행을 받으며 빈 행은 행 수와 결과에서 제외한다. 열 누락·추가 또는 빈 값이 있는 행은 해당 행만 실패 처리하고, 유효한 행은 입력 순서대로 계속 생성하며 각 비어 있지 않은 입력 행마다 동일한 순서의 성공 또는 실패 결과를 반환한다. 비어 있지 않은 행이 100개를 초과하면 전체 요청을 HTTP 400과 `{\"error\":\"too_many_rows\",\"max_rows\":100}`으로 거부한다.",
+    "Do not perform credential handling, billing, production deployment, legal or medical judgment, security-sensitive authority choices, or ambiguous external side effects.",
+    "Run the narrowest relevant local tests, type checks, or smoke checks for the changed behavior; report any verification gap explicitly.",
+    "Use the current repository/worktree runtime and established project conventions; do not choose a new framework, provider, or deployment target."
+  ],
+  "auto_session_id": "auto_10b0e1303668",
+  "blocker": null,
+  "counts": {
+    "ambiguity": 2,
+    "decisions": 44,
+    "flags": 2,
+    "gated": 6,
+    "lateral": 1,
+    "promoted": 44,
+    "questions": 26,
+    "rejected": 0
+  },
+  "degraded": false,
+  "gate_findings": [],
+  "grade": "A",
+  "interview_closure_mode": "safe_default",
+  "interview_session_id": "interview_7f421dfa96354f4d",
+  "non_goals": [],
+  "open_gaps": [],
+  "phase": "complete",
+  "provenance_histogram": {
+    "maintainer_policy": 22,
+    "model_inferred": 3,
+    "timeout_default": 3,
+    "user_confirmed": 16
+  },
+  "qa": {
+    "differences": [
+      "5 Seed QA feedback item(s) withheld from durable state"
+    ],
+    "passed": false,
+    "score": 0.52,
+    "suggestions": [
+      "5 Seed QA feedback item(s) withheld from durable state"
+    ],
+    "verdict": "revise"
+  },
+  "run_id": "auto_10b0e1303668",
+  "seed_decision_provenance": {},
+  "seed_id": "seed_f49e91e19a3e",
+  "seed_origin": "auto_pipeline",
+  "seed_path": "/Users/gyusupsim/.ouroboros/seeds/seed_f49e91e19a3e.yaml",
+  "status": "complete",
+  "stop_reason_code": null,
+  "unverified_provenance_findings": []
+}

@@ -1,0 +1,58 @@
+[
+  {
+    "task": "T1",
+    "round": 1,
+    "problem": "Protected semi-private admin auth needed a foundation while T2/T3 were concurrently editing short-link and domain-safety surfaces.",
+    "cause": "The plan is plan-only and lacks a requirements.md body, so T1 scope had to be derived from the task action and fulfillment IDs without touching sibling tasks.",
+    "rule": "Keep auth/session/role/user/audit behavior in builders_shortener.admin_auth so later admin API/UI integration can import it without changing short-link CRUD or domain policy code.",
+    "tags": ["admin-auth", "sessions", "roles", "audit", "concurrent-workers"]
+  },
+  {
+    "task": "T3",
+    "round": 1,
+    "problem": "Short-link target safety needed cached and policy-based decisions without adding an external safety lookup to every redirect.",
+    "cause": "The plan directory contains plan/context files only, so R-F4 was implemented from the T3 action and the retained MVP rule that normalized URL hashes go into url_safety_cache with unsafe and review statuses.",
+    "rule": "Keep target safety inside url_shortener, cache decisions by normalized URL hash for both sqlite and Firestore modes, block unsafe creation/redirects, and make redirect checks cache/policy-only.",
+    "tags": ["shortener", "domain-safety", "url_safety_cache", "firestore", "sqlite"]
+  },
+  {
+    "task": "T2",
+    "round": 2,
+    "problem": "Admin short-link creation must allow duplicate landing URLs while legacy public shortening still reuses a stable slug for the same URL.",
+    "cause": "R-F2 applies to the management creation path, but existing recommendation/search flows depend on shorten(url) being stable.",
+    "rule": "Use create_link/create_links/list_links/update_link for admin CRUD and keep shorten(url) as the stable public enrichment path. Alias uniqueness is enforced by slug/document ID; inactive links stay listed but resolve to not-found.",
+    "tags": ["short-links", "alias-uniqueness", "batch-create", "lifecycle", "legacy-compatibility"]
+  },
+  {
+    "task": "T4",
+    "round": 1,
+    "problem": "The a.retn.kr runtime had no boundary that connected semi-private admin sessions to the existing UrlShortener CRUD surface.",
+    "cause": "T1 produced a JSON-file AdminAuthService adapter and T2/T3 produced UrlShortener admin methods, while the production entrypoint remained the root backend.py service.",
+    "rule": "Inject AdminAuthService into backend.py handlers, keep /admin/* as the protected admin namespace, and route all link operations through UrlShortener so /s/<slug> redirect compatibility remains unchanged. Limitation: the current admin identity/session store is a file-backed adapter suitable for MVP/local and must be swapped or mounted durably before production operation.",
+    "tags": ["admin-ui", "admin-api", "integration", "redirect-compatibility", "adapter-limitation"]
+  },
+  {
+    "task": "T5",
+    "round": 1,
+    "problem": "Finalization needed repeatable operator evidence without broadening the short-link admin MVP into campaign tooling or analytics.",
+    "cause": "R-F6 explicitly defers UTM automation, detailed analytics, multiple short-link domains, production deployment, and real credential storage.",
+    "rule": "Document the admin MVP as /admin plus /admin/api/*, keep focused verification in unittest, and pin future-only row fields such as utm_source/domain/analytics as ignored until a later explicit requirements pass enables them.",
+    "tags": ["finalization", "operator-docs", "verification", "future-boundaries", "admin-mvp"]
+  },
+  {
+    "task": "T7",
+    "round": 1,
+    "problem": "Cached target safety had no environment-wired Web Risk checker and redirects trusted expired safe cache entries.",
+    "cause": "UrlSafetyPolicy.from_env only read static allow/block host policy, and resolve paths called decide with allow_external_check=false.",
+    "rule": "Wire Web Risk only when OPENCLAW_SHORTENER_SAFETY_PROVIDER and OPENCLAW_WEB_RISK_API_KEY are set; creation and redirect resolution should recheck expired cache entries, cache unsafe/review outcomes, and let fresh cache avoid external lookup.",
+    "tags": ["shortener", "domain-safety", "webrisk", "redirect-recheck", "url_safety_cache"]
+  },
+  {
+    "task": "T6",
+    "round": 1,
+    "problem": "Semi-private admin users only had an active boolean, so pending, approved, rejected, and suspended accounts could not be represented with retained status history.",
+    "cause": "The original AdminUser model treated active=true as approval and active=false as deactivation, which could not satisfy R-F1's explicit account-status and status-history contract.",
+    "rule": "Keep active for backward compatibility, but make status=approved the authentication and last-admin criterion; append every status change to status_history and invalidate sessions on role, password, or status changes.",
+    "tags": ["admin-auth", "account-status", "status-history", "sessions", "last-admin"]
+  }
+]

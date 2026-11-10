@@ -1,8 +1,10 @@
 import hashlib
+import html
 import json
 import os
 import threading
 import time
+from http import cookies
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,7 +46,15 @@ from security import (
     validate_deeplink_url,
     validate_payload_limits,
 )
-from url_shortener import BuiltinShortener, FirestoreShortener, UrlShortener
+from builders_shortener.admin_auth import (
+    ADMIN,
+    OWNER,
+    AdminAuthError,
+    AdminAuthService,
+    ACCOUNT_STATUSES,
+    build_admin_auth_service_from_env,
+)
+from url_shortener import BuiltinShortener, FirestoreShortener, UrlSafetyPolicy, UrlShortener
 
 
 # Surface enum per spec acquihire-sprint-1mo decision D9. Enum members are the fixed
@@ -68,6 +78,44 @@ _SURFACE_ENUM = frozenset(
 # Module-level set is fine — `_Handler` is per-request but shares the interpreter.
 _WARNED_UNKNOWN_SURFACES: set = set()
 _WARNED_UNKNOWN_SURFACES_LOCK = threading.Lock()
+
+
+# Observation-only traffic classifier for public short-link requests. These
+# markers intentionally stay narrow: a normal KakaoTalk/Discord in-app browser
+# is a human redirect, while the platform's dedicated link-expansion crawler is
+# a preview fetch. Classification never changes the 302 response.
+_SHORTLINK_CLASSIFIER_VERSION = "2026-07-13-v1"
+_SHORTLINK_PREVIEW_MARKERS = (
+    ("discordbot", "discord"),
+    ("telegrambot", "telegram"),
+    ("slackbot-linkexpanding", "slack"),
+    ("kakaotalk-scrap", "kakao"),
+    ("kakaotalk-scraper", "kakao"),
+)
+_SHORTLINK_AUTOMATION_MARKERS = (
+    ("openclawagentclosedloop", "openclaw-closed-loop"),
+    ("claude-user", "claude-user"),
+    ("riskscanner/", "risk-scanner"),
+    ("headlesschrome/", "headless-chrome"),
+    ("python-requests/", "python-requests"),
+    ("python-urllib/", "python-urllib"),
+    ("curl/", "curl"),
+    ("wget/", "wget"),
+    ("gvfs/", "gvfs"),
+)
+
+
+def _classify_shortlink_request(user_agent: Optional[str]) -> Tuple[str, Optional[str]]:
+    """Return (event_type, agent) without affecting redirect behavior."""
+
+    normalized = (user_agent or "").strip().lower()
+    for marker, agent in _SHORTLINK_PREVIEW_MARKERS:
+        if marker in normalized:
+            return "preview_fetch", agent
+    for marker, agent in _SHORTLINK_AUTOMATION_MARKERS:
+        if marker in normalized:
+            return "automation_fetch", agent
+    return "human_redirect", None
 
 
 def _normalize_surface(raw_value: Optional[str]) -> Tuple[str, Optional[str]]:
@@ -505,8 +553,17 @@ _OPENAPI_DOCUMENT: Dict[str, Any] = {
                     "product_id": {"type": "string"},
                     "title": {"type": "string"},
                     "price": {"type": "integer"},
-                    "deeplink": {"type": "string", "format": "uri"},
-                    "short_deeplink": {"type": "string", "format": "uri"},
+                    "deeplink": {
+                        "type": "string",
+                        "format": "uri",
+                        "deprecated": True,
+                        "description": "Legacy raw affiliate URL. Do not expose to users; migrate to short_deeplink.",
+                    },
+                    "short_deeplink": {
+                        "type": "string",
+                        "format": "uri",
+                        "description": "Canonical public affiliate link for user-facing output.",
+                    },
                     "rating": {"type": "number"},
                     "review_count": {"type": "integer"},
                 },
@@ -550,8 +607,17 @@ _OPENAPI_DOCUMENT: Dict[str, Any] = {
                     "is_free_shipping": {"type": "boolean"},
                     "rating": {"type": "number"},
                     "review_count": {"type": "integer"},
-                    "deeplink": {"type": "string", "format": "uri"},
-                    "short_deeplink": {"type": "string", "format": "uri"},
+                    "deeplink": {
+                        "type": "string",
+                        "format": "uri",
+                        "deprecated": True,
+                        "description": "Legacy raw affiliate URL. Do not expose to users; migrate to short_deeplink.",
+                    },
+                    "short_deeplink": {
+                        "type": "string",
+                        "format": "uri",
+                        "description": "Canonical public affiliate link for user-facing output.",
+                    },
                 },
             },
             "GoldboxResponse": {
@@ -646,6 +712,167 @@ _DOCS_HTML = """<!doctype html>
 </body>
 </html>
 """
+
+
+_ADMIN_LOGIN_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>a.retn.kr Admin Login</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; margin: 0; background: #f7f7f3; color: #1d1d1f; }
+    main { width: min(420px, calc(100vw - 32px)); margin: 12vh auto; }
+    form { display: grid; gap: 12px; padding: 24px; background: #fff; border: 1px solid #deded8; border-radius: 8px; }
+    label { display: grid; gap: 6px; font-size: 14px; }
+    input, button { font: inherit; padding: 10px 12px; border-radius: 6px; border: 1px solid #c8c8c2; }
+    button { background: #1d1d1f; color: #fff; cursor: pointer; }
+    .error { color: #a32121; min-height: 20px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>a.retn.kr Admin</h1>
+    <form id="login-form">
+      <label>Username <input name="username" autocomplete="username" required /></label>
+      <label>Password <input name="password" type="password" autocomplete="current-password" required /></label>
+      <button type="submit">Sign in</button>
+      <div class="error" id="error"></div>
+    </form>
+  </main>
+  <script>
+    document.getElementById('login-form').addEventListener('submit', async function (event) {
+      event.preventDefault();
+      const form = new FormData(event.currentTarget);
+      const response = await fetch('/admin/api/session', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({username: form.get('username'), password: form.get('password')})
+      });
+      if (response.ok) {
+        location.href = '/admin';
+        return;
+      }
+      const payload = await response.json().catch(() => ({}));
+      document.getElementById('error').textContent = payload.error || 'Sign in failed';
+    });
+  </script>
+</body>
+</html>
+"""
+
+
+def _admin_dashboard_html(user: Dict[str, Any], links: List[Dict[str, Any]], users: List[Dict[str, Any]]) -> str:
+    link_rows = "\n".join(
+        "<tr><td>{slug}</td><td><a href=\"{short_url}\">{short_url}</a></td><td>{target}</td><td>{owner}</td><td>{active}</td></tr>".format(
+            slug=html.escape(str(item.get("slug") or "")),
+            short_url=html.escape(str(item.get("short_url") or "")),
+            target=html.escape(str(item.get("target_url") or "")),
+            owner=html.escape(str(item.get("owner_username") or item.get("owner_status") or "")),
+            active="active" if item.get("active", True) else "inactive",
+        )
+        for item in links
+    ) or "<tr><td colspan=\"5\">No links yet.</td></tr>"
+    user_rows = "\n".join(
+        "<tr><td>{username}</td><td>{role}</td><td>{status}</td></tr>".format(
+            username=html.escape(str(item.get("username") or "")),
+            role=html.escape(str(item.get("role") or "")),
+            status=html.escape(str(item.get("status") or ("approved" if item.get("active", True) else "suspended"))),
+        )
+        for item in users
+    ) or "<tr><td colspan=\"3\">No users visible.</td></tr>"
+    can_write = user.get("role") in {OWNER, ADMIN}
+    create_form = """
+    <section>
+      <h2>Create Links</h2>
+      <form id="link-form">
+        <textarea name="rows" rows="5" placeholder="https://example.com, optional-alias"></textarea>
+        <button type="submit">Create</button>
+      </form>
+      <pre id="result"></pre>
+    </section>
+    """ if can_write else ""
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>a.retn.kr Admin</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; margin: 0; color: #1d1d1f; background: #fafaf7; }}
+    header, main {{ width: min(1120px, calc(100vw - 32px)); margin: 0 auto; }}
+    header {{ display: flex; justify-content: space-between; align-items: center; padding: 24px 0; }}
+    section {{ margin: 0 0 28px; }}
+    table {{ width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #deded8; }}
+    th, td {{ text-align: left; border-bottom: 1px solid #ecece6; padding: 10px; vertical-align: top; overflow-wrap: anywhere; }}
+    textarea {{ width: 100%; box-sizing: border-box; font: inherit; padding: 10px; border: 1px solid #c8c8c2; border-radius: 6px; }}
+    button {{ font: inherit; padding: 9px 12px; border: 1px solid #1d1d1f; border-radius: 6px; background: #1d1d1f; color: #fff; cursor: pointer; }}
+    pre {{ white-space: pre-wrap; background: #fff; border: 1px solid #deded8; padding: 10px; min-height: 20px; }}
+  </style>
+</head>
+<body>
+  <header>
+    <div><h1>Short Links</h1><div>{html.escape(str(user.get("username")))} · {html.escape(str(user.get("role")))}</div></div>
+    <button id="logout">Sign out</button>
+  </header>
+  <main>
+    {create_form}
+    <section>
+      <h2>Links</h2>
+      <table><thead><tr><th>Slug</th><th>Short URL</th><th>Target</th><th>Owner</th><th>Status</th></tr></thead><tbody>{link_rows}</tbody></table>
+    </section>
+    <section>
+      <h2>Users</h2>
+      <table><thead><tr><th>Username</th><th>Role</th><th>Status</th></tr></thead><tbody>{user_rows}</tbody></table>
+    </section>
+  </main>
+  <script>
+    const form = document.getElementById('link-form');
+    if (form) {{
+      form.addEventListener('submit', async function (event) {{
+        event.preventDefault();
+        const rows = String(new FormData(form).get('rows') || '').split(/\\n+/).map((line) => {{
+          const parts = line.split(',');
+          return {{url: (parts[0] || '').trim(), alias: (parts[1] || '').trim() || undefined}};
+        }}).filter((row) => row.url);
+        const response = await fetch('/admin/api/short-links', {{
+          method: 'POST',
+          headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify({{rows}})
+        }});
+        document.getElementById('result').textContent = JSON.stringify(await response.json(), null, 2);
+      }});
+    }}
+    document.getElementById('logout').addEventListener('click', async function () {{
+      await fetch('/admin/api/session', {{method: 'DELETE'}});
+      location.href = '/admin/login';
+    }});
+  </script>
+</body>
+</html>
+"""
+
+
+def _parse_admin_session_cookie(header_value: Optional[str]) -> Optional[str]:
+    if not header_value:
+        return None
+    jar = cookies.SimpleCookie()
+    try:
+        jar.load(header_value)
+    except cookies.CookieError:
+        return None
+    morsel = jar.get("admin_session")
+    return morsel.value if morsel else None
+
+
+def _admin_account_status_from_payload(payload: Dict[str, Any]) -> Optional[str]:
+    if "status" not in payload:
+        return None
+    status = str(payload.get("status") or "").strip().lower()
+    if status not in ACCOUNT_STATUSES:
+        allowed = ", ".join(sorted(ACCOUNT_STATUSES))
+        raise BackendError(HTTPStatus.BAD_REQUEST, f"status must be one of: {allowed}")
+    return status
 
 
 class ShoppingBackend:
@@ -966,6 +1193,47 @@ class ShoppingBackend:
         summary["economics"] = build_economics_summary(summary)
         return summary
 
+    def admin_list_short_links(self, *, actor_username: str, actor_role: str) -> List[Dict[str, Any]]:
+        if not self.shortener or not hasattr(self.shortener, "list_links"):
+            raise BackendError(HTTPStatus.NOT_IMPLEMENTED, "Short-link admin storage is not configured")
+        owner_username = None if actor_role in {OWNER, ADMIN} else actor_username
+        return [
+            record.to_dict()
+            for record in self.shortener.list_links(owner_username=owner_username, include_inactive=True)
+        ]
+
+    def admin_create_short_links(self, payload: Dict[str, Any], *, actor_username: str) -> Dict[str, Any]:
+        if not self.shortener or not hasattr(self.shortener, "create_links"):
+            raise BackendError(HTTPStatus.NOT_IMPLEMENTED, "Short-link admin storage is not configured")
+        rows = payload.get("rows")
+        if rows is None:
+            rows = [
+                {
+                    "url": payload.get("url") or payload.get("target_url") or payload.get("targetUrl"),
+                    "alias": payload.get("alias"),
+                }
+            ]
+        if not isinstance(rows, list) or not rows:
+            raise BackendError(HTTPStatus.BAD_REQUEST, "'rows' must be a non-empty list")
+        normalized_rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise BackendError(HTTPStatus.BAD_REQUEST, "Each short-link row must be an object")
+            normalized_rows.append(
+                {
+                    "url": row.get("url") or row.get("target_url") or row.get("targetUrl"),
+                    "alias": row.get("alias"),
+                }
+            )
+        return self.shortener.create_links(normalized_rows, owner_username=actor_username)
+
+    def admin_update_short_link(self, slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.shortener or not hasattr(self.shortener, "update_link"):
+            raise BackendError(HTTPStatus.NOT_IMPLEMENTED, "Short-link admin storage is not configured")
+        if "active" not in payload:
+            raise BackendError(HTTPStatus.BAD_REQUEST, "'active' is required")
+        return self.shortener.update_link(slug, active=bool(payload.get("active"))).to_dict()
+
     def proxy_gmv_rows(self, *, week_start: Optional[str] = None) -> List[Dict[str, Any]]:
         """Return weekly proxy-GMV rows written by economics.compute_weekly_proxy_gmv.
 
@@ -1145,6 +1413,7 @@ class ShoppingBackend:
 
 class _Handler(BaseHTTPRequestHandler):
     backend: ShoppingBackend
+    admin_auth: Optional[AdminAuthService] = None
     rate_limiter = build_rate_limiter_from_env()
     public_rate_limiter = build_rate_limiter_for_mode(public=True, authenticated=False)
     authenticated_rate_limiter = build_rate_limiter_for_mode(public=False, authenticated=True)
@@ -1168,6 +1437,12 @@ class _Handler(BaseHTTPRequestHandler):
                 slug = self.path.split("/s/", 1)[1].split("?", 1)[0].strip()
                 target = self.backend.resolve_short_link(slug)
                 if not target:
+                    log_event(
+                        "redirect_error",
+                        request_id=request_id,
+                        slug=slug,
+                        reason="short_link_not_found",
+                    )
                     self._send_json(HTTPStatus.NOT_FOUND, {"error": "Short link not found", "requestId": request_id})
                     return
                 self.backend.record_short_link_click(slug)
@@ -1177,6 +1452,15 @@ class _Handler(BaseHTTPRequestHandler):
                 client_ip = _first_forwarded_for(self.headers.get("X-Forwarded-For")) or remote_addr
                 user_agent = (self.headers.get("User-Agent") or "")[:200]
                 proxy_ip = remote_addr
+                traffic_event_type, traffic_agent = _classify_shortlink_request(user_agent)
+                classification_metadata = {
+                    "slug": slug,
+                    "request_id": request_id,
+                    "referer": (self.headers.get("Referer") or "")[:200],
+                    "agent": traffic_agent,
+                    "classifier_version": _SHORTLINK_CLASSIFIER_VERSION,
+                    "observation_mode": True,
+                }
                 # Emit book_click for the feedback loop — slug is joined against recent
                 # book_impression events in book_intel.feedback.rollup to recover isbn+cluster.
                 source_tag = (
@@ -1184,6 +1468,22 @@ class _Handler(BaseHTTPRequestHandler):
                     or _infer_click_source(self.headers.get("Referer", ""))
                 )
                 attribution = self._attribution_context()
+                try:
+                    self.backend.analytics_store.record_event(
+                        event_type=traffic_event_type,
+                        metadata=classification_metadata,
+                        client_ip=client_ip,
+                        user_agent=user_agent,
+                        proxy_ip=proxy_ip,
+                        **_attribution_kwargs(attribution),
+                    )
+                except Exception as exc:
+                    log_event(
+                        "shortlink_classification_store_error",
+                        slug=slug,
+                        traffic_class=traffic_event_type,
+                        error=str(exc),
+                    )
                 try:
                     self.backend.analytics_store.record_event(
                         event_type="book_click",
@@ -1211,6 +1511,10 @@ class _Handler(BaseHTTPRequestHandler):
                             "slug": slug,
                             "request_id": request_id,
                             "referer": (self.headers.get("Referer") or "")[:200],
+                            "traffic_class": traffic_event_type,
+                            "traffic_agent": traffic_agent,
+                            "classifier_version": _SHORTLINK_CLASSIFIER_VERSION,
+                            "observation_mode": True,
                         },
                         client_ip=client_ip,
                         user_agent=user_agent,
@@ -1230,6 +1534,10 @@ class _Handler(BaseHTTPRequestHandler):
                     client_ip=client_ip,
                     user_agent=user_agent,
                     proxy_ip=proxy_ip,
+                    traffic_class=traffic_event_type,
+                    traffic_agent=traffic_agent,
+                    classifier_version=_SHORTLINK_CLASSIFIER_VERSION,
+                    observation_mode=True,
                 )
                 return
             if path in ("/health", "/healthz"):
@@ -1245,6 +1553,57 @@ class _Handler(BaseHTTPRequestHandler):
                 # Swagger UI served via CDN (stdlib-only requirement forbids bundling
                 # the assets). Points the UI at /openapi.json.
                 self._send_html(HTTPStatus.OK, _DOCS_HTML, head_only=head_only)
+                return
+            if path in ("/admin/login", "/admin/login/"):
+                self._send_html(HTTPStatus.OK, _ADMIN_LOGIN_HTML, head_only=head_only)
+                return
+            if path in ("/admin", "/admin/"):
+                actor = self._authorize_admin_session()
+                links = self.backend.admin_list_short_links(actor_username=actor.username, actor_role=actor.role)
+                users: List[Dict[str, Any]] = []
+                try:
+                    if self.admin_auth:
+                        users = self.admin_auth.list_users(actor)
+                except AdminAuthError:
+                    users = []
+                self._send_html(
+                    HTTPStatus.OK,
+                    _admin_dashboard_html(actor.public_dict(), links, users),
+                    head_only=head_only,
+                )
+                return
+            if path == "/admin/api/me":
+                actor = self._authorize_admin_session()
+                self._send_json(HTTPStatus.OK, {"ok": True, "user": actor.public_dict(), "requestId": request_id}, head_only=head_only)
+                return
+            if path == "/admin/api/short-links":
+                actor = self._authorize_admin_session()
+                self._require_admin_permission(actor, "short_link:read")
+                links = self.backend.admin_list_short_links(actor_username=actor.username, actor_role=actor.role)
+                self._send_json(HTTPStatus.OK, {"ok": True, "links": links, "requestId": request_id}, head_only=head_only)
+                return
+            if path == "/admin/api/users":
+                actor = self._authorize_admin_session()
+                self._require_admin_permission(actor, "user:read")
+                users = self._admin_auth_service().list_users(actor)
+                self._send_json(HTTPStatus.OK, {"ok": True, "users": users, "requestId": request_id}, head_only=head_only)
+                return
+            if path == "/admin/api/audit":
+                actor = self._authorize_admin_session()
+                self._require_admin_permission(actor, "audit:read")
+                limit = _coerce_int_value(_query_param(parsed_path.query, "limit")) or 100
+                events = [
+                    {
+                        "action": event.action,
+                        "actor": event.actor,
+                        "target": event.target,
+                        "outcome": event.outcome,
+                        "timestamp": event.timestamp,
+                        "metadata": event.metadata,
+                    }
+                    for event in self._admin_auth_service().store.list_audit_events(limit=max(1, min(limit, 500)))
+                ]
+                self._send_json(HTTPStatus.OK, {"ok": True, "events": events, "requestId": request_id}, head_only=head_only)
                 return
             if path == "/v1/admin/summary":
                 if not _operator_routes_enabled():
@@ -1342,6 +1701,9 @@ class _Handler(BaseHTTPRequestHandler):
         except BackendError as exc:
             log_event("request_error", request_id=request_id, path=self.path, remote_addr=remote_addr, status=exc.status, error=exc.message)
             self._send_json(exc.status, {"error": exc.message, "requestId": request_id}, head_only=head_only)
+        except AdminAuthError as exc:
+            status = HTTPStatus.FORBIDDEN if "not allowed" in str(exc) else HTTPStatus.UNAUTHORIZED
+            self._send_json(status, {"error": str(exc), "requestId": request_id}, head_only=head_only)
         except Exception as exc:
             log_event("request_error", request_id=request_id, path=self.path, remote_addr=remote_addr, status=500, error=str(exc))
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Internal server error", "requestId": request_id}, head_only=head_only)
@@ -1354,6 +1716,43 @@ class _Handler(BaseHTTPRequestHandler):
             # Strip query string for route matching so public endpoints accept
             # `?utm_source=...` (spec D9/R4.4 campaign attribution) without 404-ing.
             path_only = urlsplit(self.path).path
+            if path_only == "/admin/api/session":
+                token = self._admin_auth_service().authenticate(
+                    str(payload.get("username") or ""),
+                    str(payload.get("password") or ""),
+                )
+                actor = self._admin_auth_service().resolve_session(token)
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"ok": True, "token": token, "user": actor.public_dict(), "requestId": request_id},
+                    set_cookie=f"admin_session={token}; HttpOnly; SameSite=Lax; Path=/admin; Max-Age=28800",
+                )
+                return
+            if path_only == "/admin/api/short-links":
+                actor = self._authorize_admin_session()
+                self._require_admin_permission(actor, "short_link:write")
+                response = self.backend.admin_create_short_links(payload, actor_username=actor.username)
+                self._admin_auth_service()._audit(
+                    "short_link.create",
+                    actor,
+                    "batch",
+                    "success" if response.get("ok") else "partial",
+                    {"rows": len(response.get("results") or [])},
+                )
+                status = HTTPStatus.OK if response.get("ok") else HTTPStatus.MULTI_STATUS
+                self._send_json(status, {**response, "requestId": request_id})
+                return
+            if path_only == "/admin/api/users":
+                actor = self._authorize_admin_session()
+                user = self._admin_auth_service().create_user(
+                    actor,
+                    str(payload.get("username") or ""),
+                    str(payload.get("password") or ""),
+                    str(payload.get("role") or ADMIN),
+                    status=_admin_account_status_from_payload(payload) or "approved",
+                )
+                self._send_json(HTTPStatus.CREATED, {"ok": True, "user": user.public_dict(), "requestId": request_id})
+                return
             if path_only == "/v1/public/search":
                 client_marker = self._authorize_public(request_id=request_id, remote_addr=remote_addr)
                 response = self.backend.search(payload)
@@ -1407,10 +1806,85 @@ class _Handler(BaseHTTPRequestHandler):
         except BackendError as exc:
             log_event("request_error", request_id=request_id, path=self.path, remote_addr=remote_addr, status=exc.status, error=exc.message)
             self._send_json(exc.status, {"error": exc.message, "requestId": request_id})
+        except AdminAuthError as exc:
+            status = HTTPStatus.FORBIDDEN if "not allowed" in str(exc) else HTTPStatus.UNAUTHORIZED
+            self._send_json(status, {"error": str(exc), "requestId": request_id})
         except json.JSONDecodeError:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Invalid JSON body", "requestId": request_id})
         except Exception as exc:
             log_event("request_error", request_id=request_id, path=self.path, remote_addr=remote_addr, status=500, error=str(exc))
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Internal server error", "requestId": request_id})
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        request_id = generate_request_id()
+        try:
+            payload = self._read_json()
+            path = urlsplit(self.path).path
+            if path.startswith("/admin/api/short-links/"):
+                actor = self._authorize_admin_session()
+                self._require_admin_permission(actor, "short_link:write")
+                slug = parse.unquote(path.rsplit("/", 1)[-1])
+                link = self.backend.admin_update_short_link(slug, payload)
+                self._admin_auth_service()._audit(
+                    "short_link.update",
+                    actor,
+                    slug,
+                    "success",
+                    {"active": link.get("active")},
+                )
+                self._send_json(HTTPStatus.OK, {"ok": True, "link": link, "requestId": request_id})
+                return
+            if path.startswith("/admin/api/users/"):
+                actor = self._authorize_admin_session()
+                username = parse.unquote(path.rsplit("/", 1)[-1])
+                user = self._admin_auth_service().update_user(
+                    actor,
+                    username,
+                    password=str(payload["password"]) if "password" in payload else None,
+                    role=str(payload["role"]) if "role" in payload else None,
+                    active=bool(payload["active"]) if "active" in payload else None,
+                    status=_admin_account_status_from_payload(payload),
+                )
+                self._send_json(HTTPStatus.OK, {"ok": True, "user": user.public_dict(), "requestId": request_id})
+                return
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id})
+        except BackendError as exc:
+            self._send_json(exc.status, {"error": exc.message, "requestId": request_id})
+        except AdminAuthError as exc:
+            status = HTTPStatus.FORBIDDEN if "not allowed" in str(exc) else HTTPStatus.UNAUTHORIZED
+            self._send_json(status, {"error": str(exc), "requestId": request_id})
+        except json.JSONDecodeError:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Invalid JSON body", "requestId": request_id})
+        except Exception as exc:
+            log_event("request_error", request_id=request_id, path=self.path, status=500, error=str(exc))
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Internal server error", "requestId": request_id})
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        request_id = generate_request_id()
+        try:
+            path = urlsplit(self.path).path
+            if path == "/admin/api/session":
+                token = self._admin_session_token()
+                actor = self._authorize_admin_session()
+                self._admin_auth_service().logout(actor, token)
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"ok": True, "requestId": request_id},
+                    set_cookie="admin_session=; HttpOnly; SameSite=Lax; Path=/admin; Max-Age=0",
+                )
+                return
+            if path.startswith("/admin/api/users/"):
+                actor = self._authorize_admin_session()
+                username = parse.unquote(path.rsplit("/", 1)[-1])
+                removed = self._admin_auth_service().delete_user(actor, username)
+                self._send_json(HTTPStatus.OK, {"ok": True, "removed": removed, "requestId": request_id})
+                return
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id})
+        except AdminAuthError as exc:
+            status = HTTPStatus.FORBIDDEN if "not allowed" in str(exc) else HTTPStatus.UNAUTHORIZED
+            self._send_json(status, {"error": str(exc), "requestId": request_id})
+        except Exception as exc:
+            log_event("request_error", request_id=request_id, path=self.path, status=500, error=str(exc))
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Internal server error", "requestId": request_id})
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
@@ -1490,11 +1964,20 @@ class _Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(content_length).decode("utf-8") if content_length else "{}"
         return json.loads(raw)
 
-    def _send_json(self, status: int, payload: Dict[str, Any], *, head_only: bool = False) -> None:
+    def _send_json(
+        self,
+        status: int,
+        payload: Dict[str, Any],
+        *,
+        head_only: bool = False,
+        set_cookie: Optional[str] = None,
+    ) -> None:
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("X-Request-Id", str(payload.get("requestId", "")))
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        if set_cookie:
+            self.send_header("Set-Cookie", set_cookie)
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         if not head_only:
@@ -1508,6 +1991,26 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if not head_only:
             self.wfile.write(encoded)
+
+    def _admin_auth_service(self) -> AdminAuthService:
+        if not self.admin_auth:
+            raise BackendError(HTTPStatus.NOT_IMPLEMENTED, "Admin auth is not configured")
+        return self.admin_auth
+
+    def _admin_session_token(self) -> str:
+        token = parse_bearer_token(self.headers.get("Authorization"))
+        if token:
+            return token
+        cookie_token = _parse_admin_session_cookie(self.headers.get("Cookie"))
+        if cookie_token:
+            return cookie_token
+        raise AdminAuthError("admin authentication is required")
+
+    def _authorize_admin_session(self):
+        return self._admin_auth_service().resolve_session(self._admin_session_token())
+
+    def _require_admin_permission(self, actor: Any, permission: str) -> None:
+        self._admin_auth_service().require_permission(actor, permission)
 
     def _authorize_public(self, *, request_id: str, remote_addr: str) -> str:
         client_id = self.headers.get("X-OpenClaw-Client-Id")
@@ -1547,7 +2050,8 @@ class _Handler(BaseHTTPRequestHandler):
         return client_marker
 
     def _pick_rate_limiter(self, *, token: Optional[str], internal: bool):
-        if self.path in ("/v1/admin/summary", "/v1/admin/metrics"):
+        path = urlsplit(self.path).path
+        if path.startswith("/admin/") or path in ("/admin", "/v1/admin/summary", "/v1/admin/metrics"):
             return self.admin_rate_limiter or self.rate_limiter
         if not internal:
             return self.public_rate_limiter or self.rate_limiter
@@ -1686,6 +2190,7 @@ def build_server(
     shortener: Optional[UrlShortener] = None,
     public_base_url: Optional[str] = None,
     allowed_deeplink_hosts: Optional[List[str]] = None,
+    admin_auth_service: Optional[AdminAuthService] = None,
 ) -> ThreadingHTTPServer:
     analytics_store = build_analytics_store_from_env(db_path=db_path)
     resolved_public_base_url = public_base_url or f"http://{host}:{port}"
@@ -1695,7 +2200,11 @@ def build_server(
         shortener=shortener or _build_shortener_from_env(db_path=db_path, public_base_url=resolved_public_base_url),
         allowed_deeplink_hosts=allowed_deeplink_hosts or _load_allowed_deeplink_hosts(),
     )
-    handler = type("OpenClawRequestHandler", (_Handler,), {"backend": backend})
+    handler = type(
+        "OpenClawRequestHandler",
+        (_Handler,),
+        {"backend": backend, "admin_auth": admin_auth_service or build_admin_auth_service_from_env()},
+    )
     return ThreadingHTTPServer((host, port), handler)
 
 
@@ -1743,7 +2252,11 @@ def run_server(host: Optional[str] = None, port: Optional[int] = None) -> None:
     default_public_base_url = f"http://127.0.0.1:{resolved_port}"
     os.environ.setdefault("OPENCLAW_SHOPPING_PUBLIC_BASE_URL", default_public_base_url)
     backend = build_backend_from_env()
-    handler = type("OpenClawRequestHandler", (_Handler,), {"backend": backend})
+    handler = type(
+        "OpenClawRequestHandler",
+        (_Handler,),
+        {"backend": backend, "admin_auth": build_admin_auth_service_from_env()},
+    )
     server = ThreadingHTTPServer((resolved_host, resolved_port), handler)
     try:
         server.serve_forever()
@@ -1752,8 +2265,9 @@ def run_server(host: Optional[str] = None, port: Optional[int] = None) -> None:
 
 def _build_shortener_from_env(*, db_path: str, public_base_url: str) -> Optional[UrlShortener]:
     provider = (os.getenv("OPENCLAW_SHOPPING_SHORTENER") or "").strip().lower()
+    safety_policy = UrlSafetyPolicy.from_env()
     if provider in ("", "builtin", "local"):
-        return BuiltinShortener(db_path=db_path, public_base_url=public_base_url)
+        return BuiltinShortener(db_path=db_path, public_base_url=public_base_url, safety_policy=safety_policy)
     if provider in ("firestore", "gcp"):
         project_id = os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("OPENCLAW_GCP_PROJECT") or ""
         return FirestoreShortener(
@@ -1763,6 +2277,8 @@ def _build_shortener_from_env(*, db_path: str, public_base_url: str) -> Optional
             database=os.getenv("OPENCLAW_FIRESTORE_DATABASE", "(default)"),
             access_token=os.getenv("OPENCLAW_GCP_ACCESS_TOKEN"),
             emulator_host=os.getenv("FIRESTORE_EMULATOR_HOST"),
+            safety_policy=safety_policy,
+            safety_collection=os.getenv("OPENCLAW_SHORTENER_SAFETY_COLLECTION", "url_safety_cache"),
         )
     return None
 

@@ -46,7 +46,9 @@ Hosted shopping copilot for OpenClaw.
 - Public skill traffic should use the hosted public gateway path without requiring an operator bearer token.
 - When the operator explicitly enables `OPENCLAW_SHOPPING_USE_INTERNAL_API=true`, this skill should send `OPENCLAW_SHOPPING_API_TOKEN` as a bearer token.
 - When returning recommendations, preserve the affiliate disclosure text.
-- When returning recommendations, always include the action-ready affiliate link for each recommended item. Prefer `short_deeplink`, then `deeplink`.
+- When returning recommendations, always include `short_deeplink` as the action-ready affiliate link.
+- Never print, publish, or persist the deprecated raw `deeplink`. If `short_deeplink`
+  is missing, report the link as temporarily unavailable instead of falling back.
 
 ## Output format
 
@@ -148,7 +150,7 @@ Route based on intent first:
 2. For search: extract keyword, rocket preference, price ceiling, and sort intent from the user’s text.
 3. For recommend: ask for constraints if missing (budget, use case, size).
 4. Prefer the hosted backend from `OPENCLAW_SHOPPING_BASE_URL`; default is `https://a.retn.kr`.
-5. Always include `short_deeplink` (prefer over `deeplink`) for each result.
+5. Always include `short_deeplink` for each result; never expose raw `deeplink`.
 6. If the user asks for books or taste-sensitive products, use `recommend` and personalize within the shopping flow.
 7. For book requests (책/도서/사서 추천/베스트셀러), add `"vertical": "book"` to the assist payload. The backend runs book_reco (사서추천도서 + Data4Library + Naver) and maps recommendations to Coupang products; titles without a Coupang match are dropped rather than fabricated.
 8. For personalized book ranking, attach a `persona` object to the assist payload. Supported fields: `interests` (free-text tokens), `categories`, `authors`, `avoid_categories`, `korean_preference` (0–1), `engineering_weight` (0–1). Ranking will also replay the same `X-OpenClaw-Client-Id`'s recent queries to infer an implicit persona when explicit hints are thin. Examples:

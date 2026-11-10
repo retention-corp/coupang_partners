@@ -1,0 +1,17 @@
+.gcloudignore
+.git
+.gitignore
+.env
+.env.*
+__pycache__/
+*.py[cod]
+*.sqlite3
+.DS_Store
+.omx/
+.omc/
+.claude/
+.data/
+.harness/
+artifacts/
+builders_shortener/
+scripts/deploy_builders_shortener.sh

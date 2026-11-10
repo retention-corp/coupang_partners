@@ -1,0 +1,172 @@
+{
+  "schema": "plan/v1",
+  "meta": {
+    "type": "feature",
+    "goal": "기존 Firestore 기반 a.retn.kr 숏링크 시스템에 보호된 semi-private 관리자 UI/API를 추가하고 테스트·문서화까지 완료한다.",
+    "non_goals": [
+      "UTM 자동 처리",
+      "상세 분석",
+      "운영 배포",
+      "실제 자격증명 저장"
+    ]
+  },
+  "contracts": {
+    "artifact": null,
+    "interfaces": [],
+    "invariants": []
+  },
+  "tasks": [
+    {
+      "id": "T1",
+      "action": "Implement protected semi-private authentication, sessions, roles, user management, and audit logging",
+      "fulfills": [
+        "R-F1",
+        "R-F5"
+      ],
+      "depends_on": [],
+      "parallel_safe": true,
+      "status": "done",
+      "summary": "Implemented admin auth service with hashed passwords, sessions, roles, user management, and audit logging"
+    },
+    {
+      "id": "T2",
+      "action": "Implement short-link CRUD, global alias uniqueness, batch creation, and active-state behavior",
+      "fulfills": [
+        "R-F2",
+        "R-F3"
+      ],
+      "depends_on": [],
+      "parallel_safe": true,
+      "status": "done",
+      "summary": "Implemented admin short-link CRUD, alias uniqueness, batch row results, inactive resolve behavior, and legacy listing"
+    },
+    {
+      "id": "T3",
+      "action": "Implement cached and policy-based domain safety decisions without per-request external lookup",
+      "fulfills": [
+        "R-F4"
+      ],
+      "depends_on": [],
+      "parallel_safe": true,
+      "status": "done",
+      "summary": "Implemented cached policy-based target URL safety for builtin and Firestore shorteners"
+    },
+    {
+      "id": "T4",
+      "action": "Integrate the protected admin API and usable server-rendered admin UI with the existing backend and redirect compatibility",
+      "fulfills": [
+        "R-F1",
+        "R-F2",
+        "R-F3",
+        "R-F4",
+        "R-F5"
+      ],
+      "depends_on": [
+        "T1",
+        "T2",
+        "T3"
+      ],
+      "parallel_safe": false,
+      "status": "done",
+      "summary": "Integrated protected admin UI/API with existing backend and redirect; direct AdminShortLinkIntegrationTests passed after worker shutdown recovery"
+    },
+    {
+      "id": "T5",
+      "action": "Add focused regression tests, full verification commands, operator documentation, and future extension intent",
+      "fulfills": [
+        "R-F5",
+        "R-F6"
+      ],
+      "depends_on": [
+        "T4"
+      ],
+      "parallel_safe": false,
+      "status": "done"
+    },
+    {
+      "id": "T6",
+      "action": "Verification fix: implement explicit account approval statuses and retained status history for semi-private admin access",
+      "fulfills": [
+        "R-F1"
+      ],
+      "depends_on": [
+        "T1",
+        "T4"
+      ],
+      "parallel_safe": true,
+      "status": "done",
+      "summary": "Implemented explicit admin account approval statuses with retained history and focused R-F1 tests"
+    },
+    {
+      "id": "T7",
+      "action": "Verification fix: wire cached Web Risk provider configuration and enforce safe redirect rechecks",
+      "fulfills": [
+        "R-F4"
+      ],
+      "depends_on": [
+        "T3",
+        "T4"
+      ],
+      "parallel_safe": true,
+      "status": "done",
+      "summary": "Wired env Web Risk checker and redirect expired-cache rechecks for R-F4"
+    }
+  ],
+  "journeys": [],
+  "verify_plan": [
+    {
+      "target": "R-F1",
+      "type": "sub_req",
+      "gates": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "target": "R-F2",
+      "type": "sub_req",
+      "gates": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "target": "R-F3",
+      "type": "sub_req",
+      "gates": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "target": "R-F4",
+      "type": "sub_req",
+      "gates": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "target": "R-F5",
+      "type": "sub_req",
+      "gates": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "target": "R-F6",
+      "type": "sub_req",
+      "gates": [
+        1,
+        2,
+        3
+      ]
+    }
+  ]
+}
