@@ -1,0 +1,19 @@
+python=3.9 label=authorized_expansion exit=0 duration_seconds=474 command=uv run --python 3.9 python -m unittest -q
+python=3.10 label=authorized_expansion exit=2 duration_seconds=108 command=uv run --python 3.10 python -m unittest -q
+python=3.11 label=preservation_gate exit=134 duration_seconds=0 command=uv run --python 3.11 python -m unittest -q
+python=3.12 label=authorized_expansion exit=134 duration_seconds=1 command=uv run --python 3.12 python -m unittest -q
+RETRY python=3.10 label=authorized_expansion exit=0 duration_seconds=37 command=uv run --python 3.10 python -m unittest -q
+RETRY python=3.11 label=preservation_gate exit=0 duration_seconds=37 command=uv run --python 3.11 python -m unittest -q
+RETRY python=3.12 label=authorized_expansion exit=0 duration_seconds=37 command=uv run --python 3.12 python -m unittest -q
+FINAL python=3.9 label=authorized_expansion exit=0 duration_seconds=39 command=uv run --python 3.9 python -m unittest -q
+FINAL python=3.10 label=authorized_expansion exit=0 duration_seconds=38 command=uv run --python 3.10 python -m unittest -q
+FINAL python=3.11 label=preservation_gate exit=0 duration_seconds=37 command=uv run --python 3.11 python -m unittest -q
+FINAL python=3.12 label=authorized_expansion exit=0 duration_seconds=38 command=uv run --python 3.12 python -m unittest -q
+DEFINITIVE python=3.9 label=authorized_expansion exit=0 duration_seconds=40 command=uv run --python 3.9 python -m unittest -q
+DEFINITIVE python=3.10 label=authorized_expansion exit=0 duration_seconds=39 command=uv run --python 3.10 python -m unittest -q
+DEFINITIVE python=3.11 label=preservation_gate exit=0 duration_seconds=40 command=uv run --python 3.11 python -m unittest -q
+DEFINITIVE python=3.12 label=authorized_expansion exit=0 duration_seconds=39 command=uv run --python 3.12 python -m unittest -q
+POST_LEGACY_FIX python=3.9 exit=0 command=uv run --python 3.9 python -m unittest -q
+POST_LEGACY_FIX python=3.10 exit=0 command=uv run --python 3.10 python -m unittest -q
+POST_LEGACY_FIX python=3.11 exit=0 command=uv run --python 3.11 python -m unittest -q
+POST_LEGACY_FIX python=3.12 exit=0 command=uv run --python 3.12 python -m unittest -q

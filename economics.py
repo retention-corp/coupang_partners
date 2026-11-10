@@ -344,6 +344,26 @@ def compute_effective_clicks(
     return raw_count, effective
 
 
+
+def build_campaign_click_report(rows: Sequence[Mapping[str, Any]], campaign_id: str, start_utc: datetime, end_utc: datetime) -> Dict[str, Any]:
+    raw_clicks, effective_clicks = compute_effective_clicks(rows)
+    return {"campaign_id": campaign_id, "window": {"from": start_utc.isoformat(), "to": end_utc.isoformat()}, "raw_clicks": raw_clicks, "effective_clicks": effective_clicks, "method_version": "ip_slug_10s_v1", "slug_count": len({str(row.get("slug") or "") for row in rows})}
+
+
+def compute_campaign_click_report(db_path: str, campaign_id: str, start_utc: datetime, end_utc: datetime) -> Dict[str, Any]:
+    """Aggregate only shortlink_redirect rows for one campaign in [start, end)."""
+    if not campaign_id.strip():
+        raise ValueError("campaign_id is required")
+    if start_utc.tzinfo is None or end_utc.tzinfo is None or start_utc >= end_utc:
+        raise ValueError("invalid campaign click window")
+    rows: List[Dict[str, Any]] = []
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        for row in connection.execute("SELECT created_at, shortlink_slug, client_ip FROM events WHERE event_type = 'shortlink_redirect' AND campaign_id = ? AND created_at >= ? AND created_at < ? ORDER BY created_at", (campaign_id, start_utc.isoformat(), end_utc.isoformat())).fetchall():
+            rows.append({"timestamp": row["created_at"], "slug": row["shortlink_slug"] or "", "client_ip": row["client_ip"] or ""})
+    return build_campaign_click_report(rows, campaign_id, start_utc, end_utc)
+
+
 def _load_shortlink_events(
     db_path: str,
     *,

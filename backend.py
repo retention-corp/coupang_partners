@@ -14,6 +14,8 @@ from analytics import AnalyticsStore, build_analytics_store_from_env
 from client import CoupangApiError, CoupangPartnersClient
 from economics import (
     build_economics_summary,
+    build_campaign_click_report,
+    compute_campaign_click_report,
     read_click_reconciliation_row,
     read_proxy_gmv_rows,
 )
@@ -621,6 +623,13 @@ _OPENAPI_DOCUMENT: Dict[str, Any] = {
 }
 
 
+_OPENAPI_DOCUMENT["paths"].update({
+    "/internal/v1/book-campaign-links": {"post": {"summary": "Create an idempotent campaign shortlink", "security": [{"bearerAuth": []}], "responses": {"200": {"description": "Campaign link"}, "400": {"description": "Invalid campaign body"}, "401": {"description": "Unauthorized"}, "403": {"description": "Caller not allowed"}, "404": {"description": "Feature disabled"}}}},
+    "/internal/v1/book-campaign-links/{slug}": {"get": {"summary": "Non-counting campaign or legacy link lookup", "security": [{"bearerAuth": []}], "parameters": [{"name": "slug", "in": "path", "required": True, "schema": {"type": "string"}}], "responses": {"200": {"description": "Link record"}, "404": {"description": "Missing or disabled"}}}},
+    "/internal/v1/book-campaigns/{campaign_id}/clicks": {"get": {"summary": "Campaign-isolated local click report", "security": [{"bearerAuth": []}], "parameters": [{"name": "campaign_id", "in": "path", "required": True, "schema": {"type": "string"}}, {"name": "from", "in": "query", "required": True, "schema": {"type": "string", "format": "date-time"}}, {"name": "to", "in": "query", "required": True, "schema": {"type": "string", "format": "date-time"}}], "responses": {"200": {"description": "raw/effective click report"}, "400": {"description": "Invalid window"}}}},
+})
+
+
 _DOCS_HTML = """<!doctype html>
 <html lang=\"en\">
 <head>
@@ -688,6 +697,8 @@ class ShoppingBackend:
             "ok": True,
             "service": "openclaw-shopping-backend",
             "version": "mvp",
+            "bookCampaignChangeSha": os.getenv("BOOK_CAMPAIGN_CHANGE_SHA"),
+            "bookCampaignSourceManifestSha": os.getenv("BOOK_CAMPAIGN_SOURCE_MANIFEST_SHA"),
         }
 
     def assist(
@@ -996,6 +1007,43 @@ class ShoppingBackend:
             log_event("click_reconciliation_read_error", error=str(exc))
             return None
 
+    def create_campaign_link(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        campaign_id = payload.get("campaign_id")
+        target_url = payload.get("target_url")
+        if not isinstance(campaign_id, str) or not campaign_id.strip():
+            raise BackendError(HTTPStatus.BAD_REQUEST, "campaign_id is required")
+        if not isinstance(target_url, str) or not validate_deeplink_url(target_url, self.allowed_deeplink_hosts):
+            raise BackendError(HTTPStatus.BAD_REQUEST, "target_url must be an approved Coupang URL")
+        if not self.shortener:
+            raise BackendError(HTTPStatus.SERVICE_UNAVAILABLE, "Shortener is unavailable")
+        record = self.shortener.create_campaign_link(campaign_id.strip(), target_url)
+        return {**record, "short_url": f"{self.shortener.public_base_url}/s/{record['slug']}", "disclosure": DISCLOSURE_TEXT}
+
+    def lookup_short_link(self, slug: str) -> Optional[Dict[str, Any]]:
+        if not self.shortener:
+            return None
+        record = self.shortener.lookup_link(slug)
+        if record and not validate_deeplink_url(record["target_url"], self.allowed_deeplink_hosts):
+            return None
+        return record
+
+    def campaign_click_report(self, campaign_id: str, start_raw: str, end_raw: str) -> Dict[str, Any]:
+        try:
+            start = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
+            end = datetime.fromisoformat(end_raw.replace("Z", "+00:00"))
+        except (TypeError, ValueError) as exc:
+            raise BackendError(HTTPStatus.BAD_REQUEST, "from and to must be ISO-8601 timestamps") from exc
+        db_path = getattr(self.analytics_store, "db_path", None)
+        try:
+            if db_path:
+                return compute_campaign_click_report(db_path, campaign_id, start, end)
+            if hasattr(self.analytics_store, "campaign_redirect_rows"):
+                rows = self.analytics_store.campaign_redirect_rows(campaign_id, start.isoformat(), end.isoformat())
+                return build_campaign_click_report(rows, campaign_id, start, end)
+            raise BackendError(HTTPStatus.SERVICE_UNAVAILABLE, "Campaign click reads are unavailable")
+        except ValueError as exc:
+            raise BackendError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
+
     def resolve_short_link(self, slug: str) -> Optional[str]:
         if hasattr(self.shortener, "resolve"):
             try:
@@ -1166,7 +1214,8 @@ class _Handler(BaseHTTPRequestHandler):
             query_params = parse.parse_qs(parsed_path.query)
             if self.path.startswith("/s/"):
                 slug = self.path.split("/s/", 1)[1].split("?", 1)[0].strip()
-                target = self.backend.resolve_short_link(slug)
+                link_record = self.backend.lookup_short_link(slug)
+                target = link_record["target_url"] if link_record else None
                 if not target:
                     self._send_json(HTTPStatus.NOT_FOUND, {"error": "Short link not found", "requestId": request_id})
                     return
@@ -1196,6 +1245,8 @@ class _Handler(BaseHTTPRequestHandler):
                         client_ip=client_ip,
                         user_agent=user_agent,
                         proxy_ip=proxy_ip,
+                        campaign_id=link_record.get("campaign_id"),
+                        shortlink_slug=slug,
                         **_attribution_kwargs(attribution),
                     )
                 except Exception as exc:
@@ -1215,6 +1266,8 @@ class _Handler(BaseHTTPRequestHandler):
                         client_ip=client_ip,
                         user_agent=user_agent,
                         proxy_ip=proxy_ip,
+                        campaign_id=link_record.get("campaign_id"),
+                        shortlink_slug=slug,
                         **_attribution_kwargs(attribution),
                     )
                 except Exception as exc:
@@ -1245,6 +1298,30 @@ class _Handler(BaseHTTPRequestHandler):
                 # Swagger UI served via CDN (stdlib-only requirement forbids bundling
                 # the assets). Points the UI at /openapi.json.
                 self._send_html(HTTPStatus.OK, _DOCS_HTML, head_only=head_only)
+                return
+            if path.startswith("/internal/v1/book-campaign-links/"):
+                if not _book_campaign_routes_enabled():
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id}, head_only=head_only)
+                    return
+                self._authorize_internal(request_id=request_id, remote_addr=remote_addr)
+                slug = path.rsplit("/", 1)[-1]
+                record = self.backend.lookup_short_link(slug)
+                if not record:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Short link not found", "requestId": request_id}, head_only=head_only)
+                    return
+                self._send_json(HTTPStatus.OK, {**record, "disclosure": DISCLOSURE_TEXT, "requestId": request_id}, head_only=head_only)
+                return
+            if path.startswith("/internal/v1/book-campaigns/") and path.endswith("/clicks"):
+                if not _book_campaign_routes_enabled():
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id}, head_only=head_only)
+                    return
+                self._authorize_internal(request_id=request_id, remote_addr=remote_addr)
+                campaign_id = path.split("/internal/v1/book-campaigns/", 1)[1].rsplit("/clicks", 1)[0]
+                starts = query_params.get("from", [])
+                ends = query_params.get("to", [])
+                if not starts or not ends:
+                    raise BackendError(HTTPStatus.BAD_REQUEST, "from and to are required")
+                self._send_json(HTTPStatus.OK, self.backend.campaign_click_report(campaign_id, starts[0], ends[0]), head_only=head_only)
                 return
             if path == "/v1/admin/summary":
                 if not _operator_routes_enabled():
@@ -1354,6 +1431,14 @@ class _Handler(BaseHTTPRequestHandler):
             # Strip query string for route matching so public endpoints accept
             # `?utm_source=...` (spec D9/R4.4 campaign attribution) without 404-ing.
             path_only = urlsplit(self.path).path
+            if path_only == "/internal/v1/book-campaign-links":
+                if not _book_campaign_routes_enabled():
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found", "requestId": request_id})
+                    return
+                self._authorize_internal(request_id=request_id, remote_addr=remote_addr)
+                response = self.backend.create_campaign_link(payload)
+                self._send_json(HTTPStatus.OK, {**response, "requestId": request_id})
+                return
             if path_only == "/v1/public/search":
                 client_marker = self._authorize_public(request_id=request_id, remote_addr=remote_addr)
                 response = self.backend.search(payload)
@@ -1533,12 +1618,12 @@ class _Handler(BaseHTTPRequestHandler):
         allowlist = shopping_client_allowlist_from_env()
         allowlist_enabled = shopping_client_allowlist_enabled_from_env()
         allowlisted_client = is_client_allowlisted(client_id, allowlist, allowlist_enabled)
-        if allowlist_enabled and not allowlisted_client:
-            raise BackendError(HTTPStatus.FORBIDDEN, "Client is not allowlisted")
         if auth_required and not api_tokens:
             raise BackendError(HTTPStatus.UNAUTHORIZED, "API auth is required but no token is configured on the server")
         if api_tokens and token not in api_tokens:
             raise BackendError(HTTPStatus.UNAUTHORIZED, "Missing or invalid bearer token")
+        if allowlist_enabled and not allowlisted_client:
+            raise BackendError(HTTPStatus.FORBIDDEN, "Client is not allowlisted")
         rate_limiter = self._pick_rate_limiter(token=token, internal=True)
         limiter_key = rate_limit_key(remote_addr, client_id, token, allowlisted_client=allowlisted_client)
         if rate_limiter and not rate_limiter.allow(limiter_key):
@@ -1797,6 +1882,10 @@ def _response_cache_ttl_from_env() -> int:
     except ValueError:
         return 900
     return max(0, value)
+
+
+def _book_campaign_routes_enabled() -> bool:
+    return (os.getenv("OPENCLAW_SHOPPING_ENABLE_BOOK_CAMPAIGN_ROUTES") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _operator_routes_enabled() -> bool:

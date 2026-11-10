@@ -274,3 +274,14 @@ See `openclaw_skill/README.md` for the public contract.
 ```bash
 python3 -m unittest -q
 ```
+
+
+## Book campaign attribution extension
+
+The ops-only campaign routes are disabled unless `OPENCLAW_SHOPPING_ENABLE_BOOK_CAMPAIGN_ROUTES=true`. They require bearer authentication and an allowlisted caller. The deployment allowlist includes `insta-cardnews-book-sales-v1`. Public `/s/{slug}` redirects remain tokenless.
+
+- `POST /internal/v1/book-campaign-links` creates one link per `(campaign_id, target_url)`.
+- `GET /internal/v1/book-campaign-links/{slug}` performs a non-counting lookup for campaign and legacy records.
+- `GET /internal/v1/book-campaigns/{campaign_id}/clicks?from=<ISO>&to=<ISO>` returns only campaign/window/raw/effective/method/slug-count fields. Counts use `shortlink_redirect` only and method `ip_slug_10s_v1`.
+
+Affiliate URL responses include: `파트너스 활동을 통해 일정액의 수수료를 제공받을 수 있음`.

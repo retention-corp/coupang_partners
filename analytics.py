@@ -89,7 +89,7 @@ class AnalyticsStore:
             # bucket. Re-read event_cols after the first ALTER batch so repeated migrations
             # are still idempotent when only a subset was applied before.
             event_cols = {row[1] for row in connection.execute("PRAGMA table_info(events)").fetchall()}
-            for column in ("client_ip", "user_agent", "proxy_ip"):
+            for column in ("client_ip", "user_agent", "proxy_ip", "campaign_id", "shortlink_slug"):
                 if column not in event_cols:
                     connection.execute(f"ALTER TABLE events ADD COLUMN {column} TEXT")
             connection.execute(
@@ -107,6 +107,8 @@ class AnalyticsStore:
                 "CREATE INDEX IF NOT EXISTS idx_events_type_client_ip_created_at "
                 "ON events (event_type, client_ip, created_at)"
             )
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_events_campaign_created_at ON events (campaign_id, created_at)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_events_campaign_slug_created_at ON events (campaign_id, shortlink_slug, created_at)")
 
     def record_assist(
         self,
@@ -175,6 +177,8 @@ class AnalyticsStore:
         client_ip: Optional[str] = None,
         user_agent: Optional[str] = None,
         proxy_ip: Optional[str] = None,
+        campaign_id: Optional[str] = None,
+        shortlink_slug: Optional[str] = None,
     ) -> str:
         event_id = str(uuid.uuid4())
         with contextlib.closing(sqlite3.connect(self.db_path)) as connection, connection:
@@ -182,8 +186,8 @@ class AnalyticsStore:
                 "INSERT INTO events ("
                 "id, query_id, recommendation_id, event_type, metadata_json, created_at, "
                 "surface, surface_raw, client_id, client_version, utm_source, "
-                "client_ip, user_agent, proxy_ip"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "client_ip, user_agent, proxy_ip, campaign_id, shortlink_slug"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     event_id,
                     query_id,
@@ -199,9 +203,20 @@ class AnalyticsStore:
                     client_ip,
                     user_agent,
                     proxy_ip,
+                    campaign_id,
+                    shortlink_slug,
                 ),
             )
         return event_id
+
+    def campaign_redirect_rows(self, campaign_id: str, start_iso: str, end_iso: str) -> List[Dict[str, Any]]:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                "SELECT created_at, shortlink_slug, client_ip FROM events WHERE event_type = 'shortlink_redirect' AND campaign_id = ? AND created_at >= ? AND created_at < ? ORDER BY created_at",
+                (campaign_id, start_iso, end_iso),
+            ).fetchall()
+        return [{"timestamp": row["created_at"], "slug": row["shortlink_slug"] or "", "client_ip": row["client_ip"] or ""} for row in rows]
 
     def get_summary(self) -> Dict[str, Any]:
         with contextlib.closing(sqlite3.connect(self.db_path)) as connection, connection:
@@ -378,6 +393,8 @@ class FirestoreAnalyticsStore:
         client_ip: Optional[str] = None,
         user_agent: Optional[str] = None,
         proxy_ip: Optional[str] = None,
+        campaign_id: Optional[str] = None,
+        shortlink_slug: Optional[str] = None,
     ) -> str:
         event_id = str(uuid.uuid4())
         # Firestore fields default to empty strings rather than null so downstream
@@ -397,6 +414,8 @@ class FirestoreAnalyticsStore:
             **_optional_string_field("client_id", client_id),
             **_optional_string_field("client_version", client_version),
             **_optional_string_field("utm_source", utm_source),
+            **_optional_string_field("campaign_id", campaign_id),
+            **_optional_string_field("shortlink_slug", shortlink_slug),
         }
         self._create_document(
             self.collections["events"],
@@ -404,6 +423,15 @@ class FirestoreAnalyticsStore:
             fields,
         )
         return event_id
+
+    def campaign_redirect_rows(self, campaign_id: str, start_iso: str, end_iso: str) -> List[Dict[str, Any]]:
+        response = self._request_json("POST", f"{self.documents_url}:runQuery", body={"structuredQuery": {"from": [{"collectionId": self.collections["events"]}], "where": {"compositeFilter": {"op": "AND", "filters": [{"fieldFilter": {"field": {"fieldPath": "event_type"}, "op": "EQUAL", "value": {"stringValue": "shortlink_redirect"}}}, {"fieldFilter": {"field": {"fieldPath": "campaign_id"}, "op": "EQUAL", "value": {"stringValue": campaign_id}}}, {"fieldFilter": {"field": {"fieldPath": "created_at"}, "op": "GREATER_THAN_OR_EQUAL", "value": {"timestampValue": start_iso}}}, {"fieldFilter": {"field": {"fieldPath": "created_at"}, "op": "LESS_THAN", "value": {"timestampValue": end_iso}}}]}}}})
+        rows: List[Dict[str, Any]] = []
+        for item in response if isinstance(response, list) else [response]:
+            fields = ((item or {}).get("document") or {}).get("fields") or {}
+            if fields:
+                rows.append({"timestamp": (fields.get("created_at") or {}).get("timestampValue"), "slug": (fields.get("shortlink_slug") or {}).get("stringValue", ""), "client_ip": (fields.get("client_ip") or {}).get("stringValue", "")})
+        return rows
 
     def get_summary(self) -> Dict[str, Any]:
         total_queries = self._count_collection(self.collections["queries"])

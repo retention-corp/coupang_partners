@@ -1,0 +1,66 @@
+{
+  "todo": 9,
+  "status": "done",
+  "head": "80fc2aa2d315b3884b785410f328c3ac8563bbae",
+  "changed_files": [
+    ".gcloudignore",
+    "README.md",
+    "analytics.py",
+    "backend.py",
+    "economics.py",
+    "scripts/compute_change_manifest.py",
+    "scripts/deploy_gcp_cloud_run.sh",
+    "scripts/deploy_gcp_cloud_run_ops.sh",
+    "scripts/verify_book_campaign_extension.py",
+    "test_campaign_analytics.py",
+    "test_campaign_routes.py",
+    "test_campaign_shortlinks.py",
+    "test_change_manifest.py",
+    "test_verify_book_campaign_extension.py",
+    "url_shortener.py"
+  ],
+  "tests": {
+    "python3_full": {
+      "exit": 0,
+      "tests": 288,
+      "duration_seconds": 40
+    },
+    "py_compile_exit": 0,
+    "bash_syntax_exit": 0,
+    "gcloudignore_check_exit": 0,
+    "git_diff_check_exit": 0,
+    "matrix": {
+      "3.9": 0,
+      "3.10": 0,
+      "3.11": 0,
+      "3.12": 0
+    }
+  },
+  "manual_qa": {
+    "feature_off": 404,
+    "wrong_bearer": 401,
+    "disallowed_caller": 403,
+    "staging_parity_exit": 0,
+    "one_redirect_raw_clicks": 1,
+    "non_counting_lookup_counter_equal": true,
+    "legacy_record_campaign_id": null,
+    "legacy_record_type": "legacy"
+  },
+  "adversarial": {
+    "malformed_input": "invalid body and invalid/empty window rejected",
+    "stale_state": "duplicate campaign create idempotent",
+    "flaky_tests": "none; deterministic temp SQLite, fake Firestore, injected verifier transport/parser",
+    "misleading_success": "real exit codes captured in task-9 logs",
+    "hung_commands": "none; definitive matrix 39-40 seconds/version; initial 3.9 run included uv provisioning overhead and completed"
+  },
+  "cleanup": [
+    "removed test temp directories",
+    "removed __pycache__",
+    "no deployment performed",
+    "no commit performed"
+  ],
+  "risks": [
+    "Live gcloud staging probe was not executed because deployment is Todo 14; both deploy scripts enforce it before deploy.",
+    "Modified legacy modules exceed 250 LOC at pinned HEAD; feature additions were kept localized to preserve compatibility."
+  ]
+}

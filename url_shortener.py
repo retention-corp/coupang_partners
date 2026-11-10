@@ -28,6 +28,15 @@ class UrlShortener:
     def record_click(self, slug: str) -> None:
         return None
 
+    def create_campaign_link(self, campaign_id: str, target_url: str) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    def lookup_link(self, slug: str) -> Optional[Dict[str, Any]]:
+        target = self.resolve(slug)
+        if target is None:
+            return None
+        return {"slug": slug, "target_url": target, "campaign_id": None, "record_type": "legacy"}
+
     def get_summary(self) -> Dict[str, int]:
         return {"total_short_links": 0, "total_short_link_clicks": 0}
 
@@ -46,12 +55,41 @@ class BuiltinShortener(UrlShortener):
         return f"{self.public_base_url}/s/{slug}"
 
     def resolve(self, slug: str) -> Optional[str]:
+        record = self.lookup_link(slug)
+        return record["target_url"] if record else None
+
+    def lookup_link(self, slug: str) -> Optional[Dict[str, Any]]:
         with contextlib.closing(sqlite3.connect(self.db_path)) as connection, connection:
-            row = connection.execute(
-                "SELECT target_url FROM short_links WHERE slug = ?",
-                (slug,),
-            ).fetchone()
-        return row[0] if row else None
+            row = connection.execute("SELECT target_url FROM short_links WHERE slug = ?", (slug,)).fetchone()
+            if row:
+                return {"slug": slug, "target_url": row[0], "campaign_id": None, "record_type": "legacy"}
+            row = connection.execute("SELECT target_url, campaign_id FROM campaign_short_links WHERE slug = ?", (slug,)).fetchone()
+        if not row:
+            return None
+        return {"slug": slug, "target_url": row[0], "campaign_id": row[1], "record_type": "campaign"}
+
+    def create_campaign_link(self, campaign_id: str, target_url: str) -> Dict[str, Any]:
+        if not campaign_id.strip() or not target_url.strip():
+            raise ValueError("campaign_id and target_url are required")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection, connection:
+            existing = connection.execute("SELECT slug FROM campaign_short_links WHERE campaign_id = ? AND target_url = ?", (campaign_id, target_url)).fetchone()
+            if existing:
+                slug = existing[0]
+            else:
+                while True:
+                    slug = "".join(secrets.choice(ALPHABET) for _ in range(self.slug_length))
+                    occupied = connection.execute("SELECT 1 FROM short_links WHERE slug = ? UNION ALL SELECT 1 FROM campaign_short_links WHERE slug = ?", (slug, slug)).fetchone()
+                    if occupied:
+                        continue
+                    try:
+                        connection.execute("INSERT INTO campaign_short_links (slug, campaign_id, target_url) VALUES (?, ?, ?)", (slug, campaign_id, target_url))
+                        break
+                    except sqlite3.IntegrityError:
+                        existing = connection.execute("SELECT slug FROM campaign_short_links WHERE campaign_id = ? AND target_url = ?", (campaign_id, target_url)).fetchone()
+                        if existing:
+                            slug = existing[0]
+                            break
+        return {"slug": slug, "target_url": target_url, "campaign_id": campaign_id, "record_type": "campaign"}
 
     def record_click(self, slug: str) -> None:
         with contextlib.closing(sqlite3.connect(self.db_path)) as connection, connection:
@@ -62,6 +100,10 @@ class BuiltinShortener(UrlShortener):
                     last_clicked_at = CURRENT_TIMESTAMP
                 WHERE slug = ?
                 """,
+                (slug,),
+            )
+            connection.execute(
+                "UPDATE campaign_short_links SET click_count = click_count + 1, last_clicked_at = CURRENT_TIMESTAMP WHERE slug = ?",
                 (slug,),
             )
 
@@ -84,6 +126,19 @@ class BuiltinShortener(UrlShortener):
                     click_count INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     last_clicked_at TEXT
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS campaign_short_links (
+                    slug TEXT PRIMARY KEY,
+                    campaign_id TEXT NOT NULL,
+                    target_url TEXT NOT NULL,
+                    click_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_clicked_at TEXT,
+                    UNIQUE (campaign_id, target_url)
                 )
                 """
             )
@@ -151,6 +206,25 @@ class FirestoreShortener(UrlShortener):
             slug = "".join(secrets.choice(ALPHABET) for _ in range(self.slug_length))
             if self._create_slug(slug=slug, target_url=url):
                 return f"{self.public_base_url}/s/{slug}"
+
+    def create_campaign_link(self, campaign_id: str, target_url: str) -> Dict[str, Any]:
+        if not campaign_id.strip() or not target_url.strip():
+            raise ValueError("campaign_id and target_url are required")
+        slug = self._find_campaign_slug(campaign_id, target_url)
+        while not slug:
+            candidate = "".join(secrets.choice(ALPHABET) for _ in range(self.slug_length))
+            if self._create_slug(slug=candidate, target_url=target_url, campaign_id=campaign_id):
+                slug = candidate
+            else:
+                slug = self._find_campaign_slug(campaign_id, target_url)
+        return {"slug": slug, "target_url": target_url, "campaign_id": campaign_id, "record_type": "campaign"}
+
+    def lookup_link(self, slug: str) -> Optional[Dict[str, Any]]:
+        document = self._get_document(slug)
+        if not document:
+            return None
+        campaign_id = _firestore_string(document, "campaign_id")
+        return {"slug": slug, "target_url": _firestore_string(document, "target_url"), "campaign_id": campaign_id, "record_type": "campaign" if campaign_id else "legacy"}
 
     def resolve(self, slug: str) -> Optional[str]:
         document = self._get_document(slug)
@@ -234,11 +308,19 @@ class FirestoreShortener(UrlShortener):
         )
         for item in _as_sequence(response):
             document = (item or {}).get("document")
+            if document and document.get("name") and not _firestore_string(document, "campaign_id"):
+                return str(document["name"]).rsplit("/", 1)[-1]
+        return None
+
+    def _find_campaign_slug(self, campaign_id: str, target_url: str) -> Optional[str]:
+        response = self._request_json("POST", f"{self.documents_url}:runQuery", body={"structuredQuery": {"from": [{"collectionId": self.collection}], "where": {"compositeFilter": {"op": "AND", "filters": [{"fieldFilter": {"field": {"fieldPath": "campaign_id"}, "op": "EQUAL", "value": {"stringValue": campaign_id}}}, {"fieldFilter": {"field": {"fieldPath": "target_url"}, "op": "EQUAL", "value": {"stringValue": target_url}}}]}}, "limit": 1}})
+        for item in _as_sequence(response):
+            document = (item or {}).get("document")
             if document and document.get("name"):
                 return str(document["name"]).rsplit("/", 1)[-1]
         return None
 
-    def _create_slug(self, *, slug: str, target_url: str) -> bool:
+    def _create_slug(self, *, slug: str, target_url: str, campaign_id: Optional[str] = None) -> bool:
         try:
             self._request_json(
                 "PATCH",
@@ -248,6 +330,7 @@ class FirestoreShortener(UrlShortener):
                         "target_url": {"stringValue": target_url},
                         "click_count": {"integerValue": "0"},
                         "created_at": {"timestampValue": _utc_now_iso()},
+                        **({"campaign_id": {"stringValue": campaign_id}, "record_type": {"stringValue": "campaign"}} if campaign_id else {}),
                     }
                 },
             )

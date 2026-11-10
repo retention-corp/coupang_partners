@@ -1,0 +1,12 @@
+.git
+.git/*
+__pycache__/*
+.venv/*
+.venv
+.pytest_cache/*
+.ruff_cache/*
+.mypy_cache/*
+.data/*
+.omo/*
+.book-cardnews-runs/*
+.env*
